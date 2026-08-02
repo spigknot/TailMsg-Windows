@@ -1,0 +1,12 @@
+release/update-private-key.xml
+release/packages/
+release/staging*/
+release/tailmsg-update.json
+release/version.txt
+dist/
+downloads/
+build-validation/
+build-validation-manual/
+linux/
+*.exe
+*.log

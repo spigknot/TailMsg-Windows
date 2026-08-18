@@ -2,7 +2,8 @@ namespace TailMsg
 {
     internal static class UpdateConfig
     {
-        public const string CurrentVersion = "20260818_001";
+        public const string CurrentVersion = "20260818_002";
         public const string ManifestFileId = "1XNoZq_vnVP0FGfYKnmF1cv4Rn1HcBKn4";
+        public const string GitHubRepository = "spigknot/TailMsg-Windows";
     }
 }

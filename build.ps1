@@ -1,12 +1,18 @@
 param(
     [ValidateSet("x86", "x64", "AnyCPU")]
-    [string]$Architecture = "x86"
+    [string]$Architecture = "x86",
+
+    [string]$OutputDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $projectDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$outputDirectory = Join-Path $projectDirectory "dist"
+$outputDirectory = $OutputDirectory
+if ([String]::IsNullOrWhiteSpace($outputDirectory)) {
+    $outputDirectory = Join-Path $projectDirectory "dist"
+}
+$outputDirectory = [System.IO.Path]::GetFullPath($outputDirectory)
 $publicKey = Join-Path $projectDirectory "release\update-public-key.xml"
 
 if ($Architecture -eq "x64") {

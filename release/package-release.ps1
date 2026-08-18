@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern("^\d{8}_\d{3}$")]
-    [string]$Version
+    [string]$Version,
+
+    [string]$BuildOutputDirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +13,12 @@ $releaseDirectory = Join-Path $projectDirectory "release"
 $packagesDirectory = Join-Path $releaseDirectory "packages"
 $packagePath = Join-Path $packagesDirectory ($Version + ".zip")
 $configPath = Join-Path $projectDirectory "UpdateConfig.cs"
+$buildOutputPath = $BuildOutputDirectory
+if ([String]::IsNullOrWhiteSpace($buildOutputPath)) {
+    $buildOutputPath = Join-Path $projectDirectory "dist"
+} else {
+    $buildOutputPath = [System.IO.Path]::GetFullPath($buildOutputPath)
+}
 
 if (Test-Path -LiteralPath $packagePath) {
     throw "O pacote $packagePath já existe. Versões antigas não são sobrescritas."
@@ -21,7 +29,7 @@ if ($configText -notmatch ('CurrentVersion\s*=\s*"' + [regex]::Escape($Version) 
     throw "UpdateConfig.CurrentVersion não corresponde a $Version."
 }
 
-& (Join-Path $projectDirectory "build.ps1")
+& (Join-Path $projectDirectory "build.ps1") -OutputDirectory $buildOutputPath
 if ($LASTEXITCODE -ne 0) {
     throw "A compilação falhou."
 }
@@ -40,8 +48,8 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $files = @(
-    @{ Source = (Join-Path $projectDirectory "dist\TailMsg.exe"); Entry = "TailMsg.exe" },
-    @{ Source = (Join-Path $projectDirectory "dist\TailMsgUpdater.exe"); Entry = "TailMsgUpdater.exe" },
+    @{ Source = (Join-Path $buildOutputPath "TailMsg.exe"); Entry = "TailMsg.exe" },
+    @{ Source = (Join-Path $buildOutputPath "TailMsgUpdater.exe"); Entry = "TailMsgUpdater.exe" },
     @{ Source = (Join-Path $projectDirectory "install.ps1"); Entry = "install.ps1" },
     @{ Source = (Join-Path $projectDirectory "firewall.ps1"); Entry = "firewall.ps1" },
     @{ Source = (Join-Path $projectDirectory "README.md"); Entry = "README.md" },

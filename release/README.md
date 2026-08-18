@@ -50,6 +50,22 @@ atualizado no lugar.
 6. Baixe o manifesto e o ZIP pelos URLs públicos, confira tamanho, SHA-256 e
    assinatura antes de anunciar a versão.
 
+## GitHub Releases
+
+Cada versão também recebe um pacote full em uma release do GitHub. A release
+leva o ZIP e um `tailmsg-update.json` assinado; o updater compara esse canal
+com o Drive e usa a versão mais nova, sempre validando assinatura, tamanho e
+SHA-256 antes de instalar.
+
+Depois de criar o ZIP, publique com:
+
+```powershell
+.\release\publish-github-release.ps1 -Version 20260818_002
+```
+
+O repositório configurado atualmente é `spigknot/TailMsg-Windows`.
+O ZIP é sempre full; não há publicação de diff ou incremental no TailMsg.
+
 ## Chaves
 
 - `update-public-key.xml` é incorporada ao aplicativo.

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -17,6 +18,8 @@ namespace TailMsg
         public string Sha256;
         public long Size;
         public string Signature;
+        public string DownloadUrl;
+        public string Source;
     }
 
     internal static class TailMsgUpdateClient
@@ -31,24 +34,49 @@ namespace TailMsg
             ThreadPool.QueueUserWorkItem(delegate
             {
                 bool found = false;
+                UpdateManifest selected = null;
+                List<string> failures = new List<string>();
                 try
                 {
                     EnableTls12();
-                    string json;
-                    using (WebClient client = CreateWebClient())
+                    try
                     {
-                        json = client.DownloadString(BuildDownloadUrl(
-                            UpdateConfig.ManifestFileId));
+                        UpdateManifest driveManifest = LoadDriveManifest();
+                        if (IsNewerThanCurrent(driveManifest))
+                        {
+                            selected = driveManifest;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add("Drive: " + exception.Message);
                     }
 
-                    UpdateManifest manifest = ParseManifest(json);
-                    ValidateManifest(manifest);
-                    if (String.CompareOrdinal(
-                        manifest.Version,
-                        UpdateConfig.CurrentVersion) > 0)
+                    try
+                    {
+                        UpdateManifest githubManifest = LoadGitHubManifest();
+                        if (IsNewerThanCurrent(githubManifest) &&
+                            (selected == null ||
+                             String.CompareOrdinal(
+                                 githubManifest.Version,
+                                 selected.Version) > 0))
+                        {
+                            selected = githubManifest;
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add("GitHub: " + exception.Message);
+                    }
+
+                    if (selected != null)
                     {
                         found = true;
-                        updateAvailable(manifest);
+                        updateAvailable(selected);
+                    }
+                    else if (failures.Count == 2 && failed != null)
+                    {
+                        failed(String.Join(" | ", failures.ToArray()));
                     }
                 }
                 catch (Exception exception)
@@ -88,7 +116,7 @@ namespace TailMsg
                     using (WebClient client = CreateWebClient())
                     {
                         client.DownloadFile(
-                            BuildDownloadUrl(manifest.FileId),
+                            GetDownloadUrl(manifest),
                             zipPath);
                     }
 
@@ -136,7 +164,7 @@ namespace TailMsg
         {
             if (manifest == null ||
                 !Regex.IsMatch(manifest.Version ?? "", @"^\d{8}_\d{3}$") ||
-                !Regex.IsMatch(manifest.FileId ?? "", @"^[A-Za-z0-9_-]{10,}$") ||
+                !Regex.IsMatch(manifest.FileId ?? "", @"^[A-Za-z0-9_.-]{1,200}$") ||
                 !Regex.IsMatch(manifest.Sha256 ?? "", @"^[A-Fa-f0-9]{64}$") ||
                 manifest.Size <= 0 ||
                 String.IsNullOrEmpty(manifest.Signature))
@@ -223,6 +251,87 @@ namespace TailMsg
             return manifest;
         }
 
+        private static UpdateManifest LoadDriveManifest()
+        {
+            string json;
+            using (WebClient client = CreateWebClient())
+            {
+                json = client.DownloadString(BuildDownloadUrl(
+                    UpdateConfig.ManifestFileId));
+            }
+
+            UpdateManifest manifest = ParseManifest(json);
+            manifest.DownloadUrl = BuildDownloadUrl(manifest.FileId);
+            manifest.Source = "Drive";
+            ValidateManifest(manifest);
+            return manifest;
+        }
+
+        private static UpdateManifest LoadGitHubManifest()
+        {
+            string releaseJson;
+            using (WebClient client = CreateWebClient())
+            {
+                releaseJson = client.DownloadString(BuildGitHubLatestReleaseUrl());
+            }
+
+            string releaseVersion = ReadJsonString(releaseJson, "tag_name");
+            if (!Regex.IsMatch(releaseVersion ?? "", @"^\d{8}_\d{3}$"))
+            {
+                throw new InvalidDataException(
+                    "A release mais recente do GitHub não possui uma versão válida.");
+            }
+
+            string manifestUrl = FindGitHubAssetUrl(
+                releaseJson,
+                "tailmsg-update.json");
+            string packageUrl = FindGitHubAssetUrl(
+                releaseJson,
+                releaseVersion + ".zip");
+            if (String.IsNullOrEmpty(manifestUrl) ||
+                String.IsNullOrEmpty(packageUrl))
+            {
+                throw new InvalidDataException(
+                    "A release do GitHub não contém o manifesto assinado e o ZIP completo.");
+            }
+
+            string manifestJson;
+            using (WebClient client = CreateWebClient())
+            {
+                manifestJson = client.DownloadString(manifestUrl);
+            }
+
+            UpdateManifest manifest = ParseManifest(manifestJson);
+            if (!String.Equals(
+                manifest.Version,
+                releaseVersion,
+                StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "A versão do manifesto do GitHub não corresponde à release.");
+            }
+            if (!String.Equals(
+                manifest.FileId,
+                releaseVersion + ".zip",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    "O manifesto do GitHub aponta para um arquivo inesperado.");
+            }
+
+            manifest.DownloadUrl = packageUrl;
+            manifest.Source = "GitHub";
+            ValidateManifest(manifest);
+            return manifest;
+        }
+
+        private static bool IsNewerThanCurrent(UpdateManifest manifest)
+        {
+            return manifest != null && String.CompareOrdinal(
+                manifest.Version,
+                UpdateConfig.CurrentVersion) > 0;
+        }
+
         private static string ReadJsonString(string json, string name)
         {
             Match match = Regex.Match(
@@ -231,6 +340,31 @@ namespace TailMsg
                 "\"\\s*:\\s*\"([^\"]*)\"",
                 RegexOptions.IgnoreCase);
             return match.Success ? match.Groups[1].Value : "";
+        }
+
+        private static string FindGitHubAssetUrl(
+            string json,
+            string assetName)
+        {
+            MatchCollection urls = Regex.Matches(
+                json ?? "",
+                "\\\"browser_download_url\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"",
+                RegexOptions.IgnoreCase);
+            foreach (Match urlMatch in urls)
+            {
+                string prefix = (json ?? "").Substring(0, urlMatch.Index);
+                MatchCollection names = Regex.Matches(
+                    prefix,
+                    "\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"",
+                    RegexOptions.IgnoreCase);
+                if (names.Count == 0) continue;
+                string name = names[names.Count - 1].Groups[1].Value;
+                if (String.Equals(name, assetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return urlMatch.Groups[1].Value;
+                }
+            }
+            return "";
         }
 
         internal static string BuildSignedPayload(UpdateManifest manifest)
@@ -269,11 +403,37 @@ namespace TailMsg
             return client;
         }
 
+        private static string BuildGitHubLatestReleaseUrl()
+        {
+            return "https://api.github.com/repos/" +
+                UpdateConfig.GitHubRepository +
+                "/releases/latest";
+        }
+
         private static string BuildDownloadUrl(string fileId)
         {
             return "https://drive.usercontent.google.com/download?id=" +
                 Uri.EscapeDataString(fileId) +
                 "&export=download&confirm=t";
+        }
+
+        private static string GetDownloadUrl(UpdateManifest manifest)
+        {
+            if (!String.IsNullOrEmpty(manifest.DownloadUrl))
+            {
+                Uri uri;
+                if (!Uri.TryCreate(manifest.DownloadUrl, UriKind.Absolute, out uri) ||
+                    uri.Scheme != Uri.UriSchemeHttps ||
+                    (uri.Host != "github.com" &&
+                     uri.Host != "objects.githubusercontent.com" &&
+                     uri.Host != "drive.usercontent.google.com"))
+                {
+                    throw new InvalidDataException(
+                        "A origem da atualização não é confiável.");
+                }
+                return manifest.DownloadUrl;
+            }
+            return BuildDownloadUrl(manifest.FileId);
         }
 
         private static void EnableTls12()

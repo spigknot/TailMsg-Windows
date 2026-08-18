@@ -4,8 +4,10 @@ param(
     [string]$Version,
 
     [Parameter(Mandatory = $true)]
-    [ValidatePattern("^[A-Za-z0-9_-]{10,}$")]
-    [string]$FileId
+    [ValidatePattern("^[A-Za-z0-9_.-]{1,200}$")]
+    [string]$FileId,
+
+    [string]$OutputPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +15,12 @@ $ErrorActionPreference = "Stop"
 $releaseDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $packagePath = Join-Path $releaseDirectory ("packages\" + $Version + ".zip")
 $privateKeyPath = Join-Path $releaseDirectory "update-private-key.xml"
-$manifestPath = Join-Path $releaseDirectory "tailmsg-update.json"
+$manifestPath = $OutputPath
+if ([String]::IsNullOrWhiteSpace($manifestPath)) {
+    $manifestPath = Join-Path $releaseDirectory "tailmsg-update.json"
+} else {
+    $manifestPath = [System.IO.Path]::GetFullPath($manifestPath)
+}
 
 if (-not (Test-Path -LiteralPath $packagePath)) {
     throw "Pacote não encontrado: $packagePath"

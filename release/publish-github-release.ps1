@@ -11,9 +11,13 @@ $ErrorActionPreference = "Stop"
 $projectDirectory = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $releaseDirectory = Join-Path $projectDirectory "release"
 $packagePath = Join-Path $releaseDirectory ("packages\" + $Version + ".zip")
-$githubManifestPath = Join-Path `
+$githubManifestDirectory = Join-Path `
     ([System.IO.Path]::GetTempPath()) `
-    ("TailMsg-" + $Version + "-tailmsg-update.json")
+    ("TailMsg-" + $Version)
+if (-not (Test-Path -LiteralPath $githubManifestDirectory)) {
+    New-Item -ItemType Directory -Path $githubManifestDirectory | Out-Null
+}
+$githubManifestPath = Join-Path $githubManifestDirectory "tailmsg-update.json"
 
 if (-not (Test-Path -LiteralPath $packagePath)) {
     throw "Pacote não encontrado: $packagePath"
@@ -55,7 +59,7 @@ O manifesto tailmsg-update.json é assinado e usado pelo updater para validar o 
 
 & gh release create $Version `
     $packagePath `
-    ($githubManifestPath + "#tailmsg-update.json") `
+    $githubManifestPath `
     --repo $Repository `
     --title ("TailMsg " + $Version) `
     --notes $notes

@@ -18,7 +18,7 @@ namespace TailMsgUpdater
 {
     internal static class Program
     {
-        private const string CurrentVersion = "20260818_003";
+        private const string CurrentVersion = "20260818_004";
         private const string GitHubRepository = "spigknot/TailMsg-Windows";
         private const string LatestReleaseUrl =
             "https://api.github.com/repos/spigknot/TailMsg-Windows/releases/latest";

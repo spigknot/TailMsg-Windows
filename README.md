@@ -64,6 +64,9 @@ botão **Atualização disponível**, sem executar o PowerShell novamente.
 O `TailMsgUpdater.exe` também pode ser aberto diretamente, sem parâmetros,
 para baixar o pacote full mais recente do GitHub e reparar ou recriar a pasta
 de instalação mesmo quando o `TailMsg.exe` não estiver mais disponível.
+As releases do GitHub também incluem um instalador offline versionado, que
+instala o pacote completo em `C:\Program Files\TailMsg` e cria atalhos para o
+TailMsg e para o updater.
 
 ## Atualizações
 

@@ -60,11 +60,18 @@ SHA-256 antes de instalar.
 Depois de criar o ZIP, publique com:
 
 ```powershell
-.\release\publish-github-release.ps1 -Version 20260818_003
+.\release\publish-github-release.ps1 -Version 20260818_004
 ```
 
 O repositório configurado atualmente é `spigknot/TailMsg-Windows`.
 O ZIP é sempre full; não há publicação de diff ou incremental no TailMsg.
+
+O mesmo fluxo também gera `release\generated\<versão>\setup_tailmsg_<versão>.exe`,
+um instalador offline do Inno Setup com o pacote completo embutido. Ele instala
+por padrão em `C:\Program Files\TailMsg`, cria atalhos do TailMsg e do updater
+na área de trabalho e no menu iniciar, configura o firewall e inclui o
+desinstalador nativo. O instalador é publicado como asset adicional da release
+do GitHub.
 
 O `TailMsgUpdater.exe` incluído no ZIP também funciona de forma independente:
 aberto sem parâmetros, ele consulta a release full mais recente, permite

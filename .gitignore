@@ -1,5 +1,6 @@
 release/update-private-key.xml
 release/packages/
+release/generated/
 release/staging*/
 release/tailmsg-update.json
 release/version.txt

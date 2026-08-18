@@ -81,3 +81,8 @@ Write-Host "Pacote criado: $packagePath"
 Write-Host "Versão: $Version"
 Write-Host "Tamanho: $size bytes"
 Write-Host "SHA-256: $hash"
+
+& (Join-Path $releaseDirectory "build-installer.ps1") -Version $Version -PackagePath $packagePath
+if ($LASTEXITCODE -ne 0) {
+    throw "A compilação do instalador offline falhou."
+}

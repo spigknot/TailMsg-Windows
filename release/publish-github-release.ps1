@@ -24,8 +24,16 @@ if ($configText -notmatch ('CurrentVersion\s*=\s*"' + [regex]::Escape($Version) 
     throw "UpdateConfig.CurrentVersion não corresponde a $Version."
 }
 
-& gh release view $Version --repo $Repository *> $null
-if ($LASTEXITCODE -eq 0) {
+$releaseExists = $false
+try {
+    & gh release view $Version --repo $Repository *> $null
+    $releaseExists = ($LASTEXITCODE -eq 0)
+} catch {
+    # Para uma versão nova, o gh retorna código diferente de zero ao informar
+    # corretamente que a release ainda não existe.
+    $releaseExists = $false
+}
+if ($releaseExists) {
     throw "A release $Version já existe em $Repository. Releases antigas não são sobrescritas."
 }
 

@@ -11,7 +11,9 @@ $ErrorActionPreference = "Stop"
 $projectDirectory = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $releaseDirectory = Join-Path $projectDirectory "release"
 $packagePath = Join-Path $releaseDirectory ("packages\" + $Version + ".zip")
-$githubManifestPath = Join-Path $releaseDirectory "github-tailmsg-update.json"
+$githubManifestPath = Join-Path `
+    ([System.IO.Path]::GetTempPath()) `
+    ("TailMsg-" + $Version + "-tailmsg-update.json")
 
 if (-not (Test-Path -LiteralPath $packagePath)) {
     throw "Pacote não encontrado: $packagePath"

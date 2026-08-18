@@ -570,7 +570,8 @@ namespace TailMsg
         private readonly System.Windows.Forms.Timer restoreTimer;
         private readonly bool startHidden;
         private AboutForm aboutForm;
-        private ReceivedMessageForm activeNotification;
+        private readonly List<ReceivedMessageForm> receivedNotifications =
+            new List<ReceivedMessageForm>();
         private List<PeerInfo> latestPeers = new List<PeerInfo>();
         private bool isRefreshing;
         private bool isSending;
@@ -1364,26 +1365,52 @@ namespace TailMsg
                 string line = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): " + e.Message;
                 inboxBox.AppendText(line + Environment.NewLine);
-                if (activeNotification != null && !activeNotification.IsDisposed)
-                {
-                    activeNotification.Close();
-                }
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,
                     localComputerName,
                     delegate { ShowFromTray(); });
-                activeNotification = notification;
+                receivedNotifications.Add(notification);
                 notification.FormClosed += delegate
                 {
-                    if (Object.ReferenceEquals(activeNotification, notification))
-                    {
-                        activeNotification = null;
-                    }
+                    receivedNotifications.Remove(notification);
+                    RepositionNotifications();
                 };
+                RepositionNotifications();
                 notification.Show();
+                RepositionNotifications();
                 statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                 statusLabel.Text = "Nova mensagem recebida de " + e.SenderName + ".";
             });
+        }
+
+        private void RepositionNotifications()
+        {
+            for (int index = receivedNotifications.Count - 1; index >= 0; index--)
+            {
+                ReceivedMessageForm notification = receivedNotifications[index];
+                if (notification == null || notification.IsDisposed)
+                {
+                    receivedNotifications.RemoveAt(index);
+                }
+            }
+
+            if (receivedNotifications.Count == 0)
+            {
+                return;
+            }
+
+            Rectangle area = Screen.PrimaryScreen.WorkingArea;
+            const int edgeMargin = 12;
+            const int notificationGap = 6;
+            int left = area.Right - edgeMargin - receivedNotifications[0].Width;
+
+            for (int index = 0; index < receivedNotifications.Count; index++)
+            {
+                ReceivedMessageForm notification = receivedNotifications[index];
+                int top = area.Bottom - edgeMargin - notification.Height -
+                    (index * (notification.Height + notificationGap));
+                notification.SetNotificationLocation(new Point(left, top));
+            }
         }
 
     }
@@ -1574,7 +1601,12 @@ namespace TailMsg
             copyButton.Click += CopyButtonClick;
             body.Controls.Add(copyButton);
 
-            Shown += delegate { PositionNearTray(); };
+        }
+
+        internal void SetNotificationLocation(Point location)
+        {
+            StartPosition = FormStartPosition.Manual;
+            Location = location;
         }
 
         public void ApplyTransparency()
@@ -1643,13 +1675,6 @@ namespace TailMsg
                 parameters.ExStyle |= WsExNoActivate | WsExToolWindow;
                 return parameters;
             }
-        }
-
-        private void PositionNearTray()
-        {
-            Rectangle area = Screen.PrimaryScreen.WorkingArea;
-            Left = area.Right - Width - 12;
-            Top = area.Bottom - Height - 12;
         }
 
         private void OpenMainButtonClick(object sender, EventArgs e)

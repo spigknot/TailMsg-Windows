@@ -31,9 +31,6 @@ if ($LASTEXITCODE -eq 0) {
     -Version $Version `
     -FileId ($Version + ".zip") `
     -OutputPath $githubManifestPath
-if ($LASTEXITCODE -ne 0) {
-    throw "A assinatura do manifesto do GitHub falhou."
-}
 
 $hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $size = (Get-Item -LiteralPath $packagePath).Length

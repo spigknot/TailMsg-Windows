@@ -1166,11 +1166,12 @@ namespace TailMsg
             {
                 RadioButton option = new RadioButton();
                 option.AutoSize = false;
-                option.Height = 38;
+                option.Height = 20;
                 option.Width = Math.Max(100, computerList.ClientSize.Width - 30);
+                option.Margin = new Padding(0);
                 option.Padding = new Padding(5, 0, 0, 0);
                 option.Text = computer.Name + "  (" + computer.Address + ")" +
-                    (computer.IsLocal ? "  [este computador]" : "");
+                    (computer.IsLocal ? "  [você]" : "");
                 option.Tag = computer;
                 option.Checked = computer.Address == selectedAddress;
                 option.CheckedChanged += DestinationSelectionChanged;
@@ -1299,7 +1300,10 @@ namespace TailMsg
                 string line = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): " + e.Message;
                 inboxBox.AppendText(line + Environment.NewLine);
-                ReceivedMessageForm notification = new ReceivedMessageForm(e);
+                ReceivedMessageForm notification = new ReceivedMessageForm(
+                    e,
+                    localComputerName,
+                    delegate { ShowFromTray(); });
                 notification.Show();
                 statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                 statusLabel.Text = "Nova mensagem recebida de " + e.SenderName + ".";
@@ -1309,93 +1313,217 @@ namespace TailMsg
 
     internal sealed class ReceivedMessageForm : Form
     {
+        private const int WsExNoActivate = 0x08000000;
+        private const int WsExToolWindow = 0x00000080;
+        private readonly MessageReceivedEventArgs message;
+        private readonly string localComputerName;
+        private readonly Action openMainWindow;
         private readonly TextBox contentBox;
+        private readonly TextBox replyBox;
         private readonly Button copyButton;
+        private readonly Button replyButton;
 
-        public ReceivedMessageForm(MessageReceivedEventArgs message)
+        public ReceivedMessageForm(
+            MessageReceivedEventArgs message,
+            string localComputerName,
+            Action openMainWindow)
         {
-            Text = "Nova mensagem - TailMsg";
-            StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(520, 310);
-            MinimumSize = new Size(420, 250);
-            Font = new Font("Segoe UI", 9F);
-            BackColor = Color.FromArgb(245, 247, 250);
-            Icon = AppResources.ApplicationIcon;
-            TopMost = true;
-            ShowInTaskbar = true;
+            this.message = message;
+            this.localComputerName = localComputerName;
+            this.openMainWindow = openMainWindow;
 
-            Panel header = new Panel();
-            header.Dock = DockStyle.Top;
-            header.Height = 74;
-            header.Padding = new Padding(20, 12, 20, 8);
-            header.BackColor = Color.FromArgb(31, 41, 55);
-            Controls.Add(header);
+            Text = "Mensagem recebida - TailMsg";
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(420, 247);
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            ShowIcon = false;
+            TopMost = true;
+            Opacity = 0.7D;
+            Font = new Font("Segoe UI", 9F);
+
+            Panel body = new Panel();
+            body.Dock = DockStyle.Fill;
+            body.Padding = new Padding(10);
+            body.BackColor = Color.FromArgb(31, 41, 55);
+            Controls.Add(body);
+
+            Label openButton = new Label();
+            openButton.Text = "↖";
+            openButton.Font = new Font("Segoe UI Symbol", 17F, FontStyle.Bold);
+            openButton.Size = new Size(32, 28);
+            openButton.Location = new Point(3, 3);
+            openButton.TextAlign = ContentAlignment.MiddleCenter;
+            openButton.BackColor = body.BackColor;
+            openButton.ForeColor = Color.White;
+            openButton.Cursor = Cursors.Hand;
+            openButton.TabStop = false;
+            openButton.Click += OpenMainButtonClick;
+            body.Controls.Add(openButton);
+
+            Label closeButton = new Label();
+            closeButton.Text = "×";
+            closeButton.Font = new Font("Segoe UI", 15F, FontStyle.Bold);
+            closeButton.Size = new Size(32, 28);
+            closeButton.Location = new Point(body.ClientSize.Width - 35, 3);
+            closeButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            closeButton.TextAlign = ContentAlignment.MiddleCenter;
+            closeButton.BackColor = body.BackColor;
+            closeButton.ForeColor = Color.White;
+            closeButton.Cursor = Cursors.Hand;
+            closeButton.TabStop = false;
+            closeButton.Click += delegate { Close(); };
+            body.Controls.Add(closeButton);
 
             Label title = new Label();
-            title.AutoSize = true;
+            title.AutoSize = false;
             title.Text = "Mensagem recebida";
+            title.TextAlign = ContentAlignment.MiddleCenter;
             title.ForeColor = Color.White;
-            title.Font = new Font("Segoe UI Semibold", 14F);
-            title.Location = new Point(18, 9);
-            header.Controls.Add(title);
+            title.Font = new Font("Segoe UI Semibold", 11F);
+            title.Location = new Point(52, 8);
+            title.Size = new Size(body.ClientSize.Width - 104, 30);
+            title.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            body.Controls.Add(title);
 
             Label sender = new Label();
-            sender.AutoSize = true;
+            sender.AutoSize = false;
             sender.Text = "De: " + message.SenderName + "  (" + message.RemoteAddress + ")";
+            sender.TextAlign = ContentAlignment.MiddleLeft;
             sender.ForeColor = Color.FromArgb(209, 213, 219);
-            sender.Location = new Point(20, 45);
-            header.Controls.Add(sender);
-
-            Panel buttons = new Panel();
-            buttons.Dock = DockStyle.Bottom;
-            buttons.Height = 62;
-            buttons.Padding = new Padding(20, 12, 20, 12);
-            buttons.BackColor = Color.White;
-            Controls.Add(buttons);
-
-            Button closeButton = new Button();
-            closeButton.Text = "Fechar";
-            closeButton.Dock = DockStyle.Right;
-            closeButton.Width = 96;
-            closeButton.Click += delegate { Close(); };
-            buttons.Controls.Add(closeButton);
-
-            copyButton = new Button();
-            copyButton.Text = "Copiar";
-            copyButton.Dock = DockStyle.Right;
-            copyButton.Width = 96;
-            copyButton.Margin = new Padding(0, 0, 10, 0);
-            copyButton.BackColor = Color.FromArgb(37, 99, 235);
-            copyButton.ForeColor = Color.White;
-            copyButton.FlatStyle = FlatStyle.Flat;
-            copyButton.FlatAppearance.BorderSize = 0;
-            copyButton.Click += CopyButtonClick;
-            buttons.Controls.Add(copyButton);
-
-            Panel contentPanel = new Panel();
-            contentPanel.Dock = DockStyle.Fill;
-            contentPanel.Padding = new Padding(20);
-            Controls.Add(contentPanel);
-            contentPanel.BringToFront();
+            sender.Location = new Point(10, 43);
+            sender.Size = new Size(body.ClientSize.Width - 20, 22);
+            sender.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            body.Controls.Add(sender);
 
             contentBox = new TextBox();
-            contentBox.Dock = DockStyle.Fill;
             contentBox.Multiline = true;
             contentBox.ReadOnly = true;
             contentBox.ScrollBars = ScrollBars.Vertical;
-            contentBox.Font = new Font("Segoe UI", 11F);
+            contentBox.Font = new Font("Segoe UI", 10F);
             contentBox.BackColor = Color.White;
             contentBox.Text = message.Message;
-            contentPanel.Controls.Add(contentBox);
+            contentBox.Location = new Point(5, 65);
+            contentBox.Size = new Size(body.ClientSize.Width - 10, 54);
+            contentBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            contentBox.MouseDown += ActivateForInteraction;
+            body.Controls.Add(contentBox);
 
-            AcceptButton = copyButton;
-            CancelButton = closeButton;
-            Shown += delegate
+            Label replyLabel = new Label();
+            replyLabel.AutoSize = true;
+            replyLabel.Text = "Responder:";
+            replyLabel.ForeColor = Color.FromArgb(209, 213, 219);
+            replyLabel.Location = new Point(5, 145);
+            body.Controls.Add(replyLabel);
+
+            replyBox = new TextBox();
+            replyBox.Multiline = true;
+            replyBox.ScrollBars = ScrollBars.Vertical;
+            replyBox.Font = new Font("Segoe UI", 10F);
+            replyBox.BackColor = Color.White;
+            replyBox.Location = new Point(5, 165);
+            replyBox.Size = new Size(body.ClientSize.Width - 10, 54);
+            replyBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            replyBox.MouseDown += ActivateForInteraction;
+            body.Controls.Add(replyBox);
+
+            replyButton = new Button();
+            replyButton.Text = "Enviar";
+            replyButton.Size = new Size(52, 22);
+            replyButton.Location = new Point(body.ClientSize.Width - 57, 221);
+            replyButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            replyButton.BackColor = Color.FromArgb(37, 99, 235);
+            replyButton.ForeColor = Color.White;
+            replyButton.FlatStyle = FlatStyle.Flat;
+            replyButton.FlatAppearance.BorderSize = 0;
+            replyButton.Cursor = Cursors.Hand;
+            replyButton.Click += ReplyButtonClick;
+            body.Controls.Add(replyButton);
+
+            copyButton = new Button();
+            copyButton.Text = "Copiar";
+            copyButton.Size = new Size(52, 22);
+            copyButton.Location = new Point(body.ClientSize.Width - 57, 122);
+            copyButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            copyButton.BackColor = Color.FromArgb(55, 65, 81);
+            copyButton.ForeColor = Color.White;
+            copyButton.FlatStyle = FlatStyle.Flat;
+            copyButton.FlatAppearance.BorderSize = 0;
+            copyButton.Cursor = Cursors.Hand;
+            copyButton.Click += CopyButtonClick;
+            body.Controls.Add(copyButton);
+
+            Shown += delegate { PositionNearTray(); };
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams parameters = base.CreateParams;
+                parameters.ExStyle |= WsExNoActivate | WsExToolWindow;
+                return parameters;
+            }
+        }
+
+        private void PositionNearTray()
+        {
+            Rectangle area = Screen.PrimaryScreen.WorkingArea;
+            Left = area.Right - Width - 12;
+            Top = area.Bottom - Height - 12;
+        }
+
+        private void OpenMainButtonClick(object sender, EventArgs e)
+        {
+            Close();
+            if (openMainWindow != null) openMainWindow();
+        }
+
+        private void ActivateForInteraction(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
             {
                 Activate();
-                contentBox.Focus();
-                contentBox.SelectAll();
-            };
+            }
+        }
+
+        private void ReplyButtonClick(object sender, EventArgs e)
+        {
+            string reply = replyBox.Text.Trim();
+            if (reply.Length == 0)
+            {
+                replyBox.Focus();
+                return;
+            }
+
+            replyButton.Enabled = false;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                PeerInfo peer = new PeerInfo();
+                peer.Name = message.SenderName;
+                peer.Address = message.RemoteAddress;
+                peer.Port = NetworkService.TcpPort;
+                MessageSendResult result = MessageSender.Send(peer, localComputerName, reply);
+                if (IsDisposed) return;
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    replyButton.Enabled = true;
+                    if (result.Success)
+                    {
+                        replyBox.Clear();
+                        replyButton.Text = "Enviado";
+                    }
+                    else
+                    {
+                        MessageBox.Show(this, result.ErrorMessage, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                });
+            });
         }
 
         private void CopyButtonClick(object sender, EventArgs e)

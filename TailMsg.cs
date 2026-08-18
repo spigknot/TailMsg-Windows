@@ -106,6 +106,69 @@ namespace TailMsg
         }
     }
 
+    internal static class NotificationSettings
+    {
+        private const string SettingsKey = @"Software\TailMsg";
+        private const string TransparencyValue = "NotificationTransparencyPercent";
+        public const int DefaultTransparencyPercent = 30;
+        public const int MinimumTransparencyPercent = 0;
+        public const int MaximumTransparencyPercent = 80;
+
+        public static int TransparencyPercent
+        {
+            get
+            {
+                try
+                {
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(SettingsKey))
+                    {
+                        if (key != null)
+                        {
+                            object value = key.GetValue(TransparencyValue);
+                            int parsed = Convert.ToInt32(value);
+                            return Normalize(parsed);
+                        }
+                    }
+                }
+                catch { }
+                return DefaultTransparencyPercent;
+            }
+        }
+
+        public static double WindowOpacity
+        {
+            get { return 1.0D - (TransparencyPercent / 100.0D); }
+        }
+
+        public static void SetTransparencyPercent(int percent)
+        {
+            percent = Normalize(percent);
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                {
+                    if (key != null)
+                    {
+                        key.SetValue(
+                            TransparencyValue,
+                            percent,
+                            RegistryValueKind.DWord);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static int Normalize(int percent)
+        {
+            if (percent < MinimumTransparencyPercent)
+                return MinimumTransparencyPercent;
+            if (percent > MaximumTransparencyPercent)
+                return MaximumTransparencyPercent;
+            return percent;
+        }
+    }
+
     internal static class AppResources
     {
         private static Icon applicationIcon;
@@ -507,6 +570,7 @@ namespace TailMsg
         private readonly System.Windows.Forms.Timer restoreTimer;
         private readonly bool startHidden;
         private AboutForm aboutForm;
+        private ReceivedMessageForm activeNotification;
         private List<PeerInfo> latestPeers = new List<PeerInfo>();
         private bool isRefreshing;
         private bool isSending;
@@ -1300,15 +1364,28 @@ namespace TailMsg
                 string line = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): " + e.Message;
                 inboxBox.AppendText(line + Environment.NewLine);
+                if (activeNotification != null && !activeNotification.IsDisposed)
+                {
+                    activeNotification.Close();
+                }
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,
                     localComputerName,
                     delegate { ShowFromTray(); });
+                activeNotification = notification;
+                notification.FormClosed += delegate
+                {
+                    if (Object.ReferenceEquals(activeNotification, notification))
+                    {
+                        activeNotification = null;
+                    }
+                };
                 notification.Show();
                 statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                 statusLabel.Text = "Nova mensagem recebida de " + e.SenderName + ".";
             });
         }
+
     }
 
     internal sealed class ReceivedMessageForm : Form
@@ -1322,6 +1399,10 @@ namespace TailMsg
         private readonly TextBox replyBox;
         private readonly Button copyButton;
         private readonly Button replyButton;
+        private readonly Button transparencyButton;
+        private readonly ContextMenuStrip transparencyMenu;
+        private readonly Font transparencyRegularFont;
+        private readonly Font transparencySelectedFont;
 
         public ReceivedMessageForm(
             MessageReceivedEventArgs message,
@@ -1334,12 +1415,12 @@ namespace TailMsg
 
             Text = "Mensagem recebida - TailMsg";
             StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(420, 247);
+            ClientSize = new Size(420, 248);
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             ShowIcon = false;
             TopMost = true;
-            Opacity = 0.7D;
+            Opacity = NotificationSettings.WindowOpacity;
             Font = new Font("Segoe UI", 9F);
 
             Panel body = new Panel();
@@ -1429,8 +1510,8 @@ namespace TailMsg
 
             replyButton = new Button();
             replyButton.Text = "Enviar";
-            replyButton.Size = new Size(52, 22);
-            replyButton.Location = new Point(body.ClientSize.Width - 57, 221);
+            replyButton.Size = new Size(64, 22);
+            replyButton.Location = new Point(body.ClientSize.Width - 69, 221);
             replyButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             replyButton.BackColor = Color.FromArgb(37, 99, 235);
             replyButton.ForeColor = Color.White;
@@ -1440,10 +1521,50 @@ namespace TailMsg
             replyButton.Click += ReplyButtonClick;
             body.Controls.Add(replyButton);
 
+            transparencyMenu = new ContextMenuStrip();
+            transparencyMenu.AutoSize = false;
+            transparencyMenu.ShowCheckMargin = false;
+            transparencyMenu.ShowImageMargin = false;
+            transparencyRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular);
+            transparencySelectedFont = new Font("Segoe UI", 9F, FontStyle.Bold);
+            for (int percent = NotificationSettings.MinimumTransparencyPercent;
+                 percent <= NotificationSettings.MaximumTransparencyPercent;
+                 percent += 10)
+            {
+                int selectedPercent = percent;
+                ToolStripMenuItem option = new ToolStripMenuItem(percent + "%");
+                option.AutoSize = false;
+                option.Height = 22;
+                option.Width = 40;
+                option.Click += delegate
+                {
+                    NotificationSettings.SetTransparencyPercent(selectedPercent);
+                    UpdateTransparencyMenu();
+                    ApplyTransparency();
+                };
+                transparencyMenu.Items.Add(option);
+            }
+
+            transparencyButton = new Button();
+            transparencyButton.Text = NotificationSettings.TransparencyPercent + "%";
+            transparencyButton.Size = new Size(40, 22);
+            transparencyButton.Location = new Point(5, 221);
+            transparencyButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            transparencyButton.BackColor = Color.FromArgb(55, 65, 81);
+            transparencyButton.ForeColor = Color.White;
+            transparencyButton.FlatStyle = FlatStyle.Flat;
+            transparencyButton.FlatAppearance.BorderSize = 0;
+            transparencyButton.Cursor = Cursors.Hand;
+            transparencyButton.Click += TransparencyButtonClick;
+            transparencyMenu.Width = transparencyButton.Width;
+            transparencyMenu.Height =
+                (transparencyMenu.Items.Count * transparencyButton.Height) + 4;
+            body.Controls.Add(transparencyButton);
+
             copyButton = new Button();
             copyButton.Text = "Copiar";
-            copyButton.Size = new Size(52, 22);
-            copyButton.Location = new Point(body.ClientSize.Width - 57, 122);
+            copyButton.Size = new Size(64, 22);
+            copyButton.Location = new Point(body.ClientSize.Width - 69, 122);
             copyButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             copyButton.BackColor = Color.FromArgb(55, 65, 81);
             copyButton.ForeColor = Color.White;
@@ -1454,6 +1575,59 @@ namespace TailMsg
             body.Controls.Add(copyButton);
 
             Shown += delegate { PositionNearTray(); };
+        }
+
+        public void ApplyTransparency()
+        {
+            if (!IsDisposed)
+            {
+                Opacity = NotificationSettings.WindowOpacity;
+                if (transparencyButton != null)
+                {
+                    transparencyButton.Text = NotificationSettings.TransparencyPercent + "%";
+                }
+            }
+        }
+
+        private void TransparencyButtonClick(object sender, EventArgs e)
+        {
+            UpdateTransparencyMenu();
+            Size menuSize = transparencyMenu.GetPreferredSize(
+                new Size(transparencyButton.Width, 0));
+            transparencyMenu.Show(
+                transparencyButton,
+                new Point(
+                    0,
+                    -menuSize.Height));
+        }
+
+        private void UpdateTransparencyMenu()
+        {
+            int selected = NotificationSettings.TransparencyPercent;
+            transparencyButton.Text = selected + "%";
+            foreach (ToolStripItem item in transparencyMenu.Items)
+            {
+                ToolStripMenuItem option = item as ToolStripMenuItem;
+                if (option == null) continue;
+                int percent;
+                bool selectedOption = Int32.TryParse(
+                    option.Text.TrimEnd('%'),
+                    out percent) && percent == selected;
+                option.Font = selectedOption ?
+                    transparencySelectedFont :
+                    transparencyRegularFont;
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (transparencyMenu != null) transparencyMenu.Dispose();
+                if (transparencyRegularFont != null) transparencyRegularFont.Dispose();
+                if (transparencySelectedFont != null) transparencySelectedFont.Dispose();
+            }
+            base.Dispose(disposing);
         }
 
         protected override bool ShowWithoutActivation
@@ -1509,20 +1683,24 @@ namespace TailMsg
                 peer.Address = message.RemoteAddress;
                 peer.Port = NetworkService.TcpPort;
                 MessageSendResult result = MessageSender.Send(peer, localComputerName, reply);
-                if (IsDisposed) return;
-                BeginInvoke((MethodInvoker)delegate
+                if (IsDisposed || !IsHandleCreated) return;
+                try
                 {
-                    replyButton.Enabled = true;
-                    if (result.Success)
+                    BeginInvoke((MethodInvoker)delegate
                     {
-                        replyBox.Clear();
-                        replyButton.Text = "Enviado";
-                    }
-                    else
-                    {
-                        MessageBox.Show(this, result.ErrorMessage, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                });
+                        replyButton.Enabled = true;
+                        if (result.Success)
+                        {
+                            replyBox.Clear();
+                            replyButton.Text = "Enviado";
+                        }
+                        else
+                        {
+                            MessageBox.Show(this, result.ErrorMessage, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }
+                    });
+                }
+                catch (InvalidOperationException) { }
             });
         }
 

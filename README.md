@@ -61,6 +61,9 @@ regra de firewall é necessária para receber mensagens e responder à descobert
 A execução inicial de `install.ps1` também instala o helper
 `TailMsgUpdater.exe`. Depois disso, versões futuras podem ser instaladas pelo
 botão **Atualização disponível**, sem executar o PowerShell novamente.
+O `TailMsgUpdater.exe` também pode ser aberto diretamente, sem parâmetros,
+para baixar o pacote full mais recente do GitHub e reparar ou recriar a pasta
+de instalação mesmo quando o `TailMsg.exe` não estiver mais disponível.
 
 ## Atualizações
 

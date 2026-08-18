@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -14,12 +18,44 @@ namespace TailMsgUpdater
 {
     internal static class Program
     {
+        private const string CurrentVersion = "20260818_003";
+        private const string GitHubRepository = "spigknot/TailMsg-Windows";
+        private const string LatestReleaseUrl =
+            "https://api.github.com/repos/spigknot/TailMsg-Windows/releases/latest";
+        private const string GitHubUserAgent = "TailMsgUpdater/" + CurrentVersion;
+        private const int MaximumReleaseResponseBytes = 2 * 1024 * 1024;
+        private const int MaximumZipEntries = 1000;
+        private const long MaximumZipBytes = 512L * 1024L * 1024L;
+
+        private sealed class FullRelease
+        {
+            public string Version;
+            public string ZipName;
+            public string DownloadUrl;
+            public string Sha256;
+            public long Size;
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
             try
             {
+                if (args == null || args.Length == 0)
+                {
+                    Application.EnableVisualStyles();
+                    Application.SetCompatibleTextRenderingDefault(false);
+                    Application.Run(new StandaloneUpdaterForm());
+                    return;
+                }
+
                 Dictionary<string, string> options = ParseArguments(args);
+                if (options.ContainsKey("--standalone-install"))
+                {
+                    RunStandaloneInstall(options);
+                    return;
+                }
+
                 string zipPath = Require(options, "--zip");
                 string targetDirectory = Path.GetFullPath(
                     Require(options, "--target"));
@@ -53,6 +89,482 @@ namespace TailMsgUpdater
                     MessageBoxIcon.Error);
                 Environment.ExitCode = 1;
             }
+        }
+
+        private static void RunStandaloneInstall(
+            Dictionary<string, string> options)
+        {
+            string zipPath = Require(options, "--zip");
+            string targetDirectory = Path.GetFullPath(
+                Require(options, "--target"));
+
+            ValidateStandaloneTarget(targetDirectory);
+            CloseTailMsgInTarget(targetDirectory);
+            InstallPackage(zipPath, targetDirectory);
+            ConfigureUser(targetDirectory);
+            ConfigureFirewallIfElevated(targetDirectory);
+            StartApplication(targetDirectory);
+        }
+
+        private static FullRelease LoadLatestFullRelease()
+        {
+            string json = DownloadText(LatestReleaseUrl);
+            string version = ReadJsonString(json, "tag_name");
+            if (!Regex.IsMatch(version ?? "", @"^\d{8}_\d{3}$"))
+            {
+                throw new InvalidDataException(
+                    "A release mais recente do GitHub possui uma versão inválida.");
+            }
+
+            string expectedName = version + ".zip";
+            List<string> assets = ExtractJsonObjects(json, "assets");
+            foreach (string asset in assets)
+            {
+                string name = ReadJsonString(asset, "name");
+                if (!String.Equals(
+                    name,
+                    expectedName,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string digest = ReadJsonString(asset, "digest") ?? "";
+                digest = Regex.Replace(
+                    digest,
+                    @"^sha256:",
+                    "",
+                    RegexOptions.IgnoreCase);
+                long size = ReadJsonLong(asset, "size");
+                string url = ReadJsonString(asset, "browser_download_url");
+                Uri parsed;
+                if (!Regex.IsMatch(digest, @"^[0-9a-fA-F]{64}$") || size <= 0)
+                {
+                    throw new InvalidDataException(
+                        "O GitHub não forneceu tamanho e SHA-256 válidos para o pacote full.");
+                }
+                if (!Uri.TryCreate(url, UriKind.Absolute, out parsed) ||
+                    parsed.Scheme != Uri.UriSchemeHttps ||
+                    (parsed.Host != "github.com" &&
+                     parsed.Host != "objects.githubusercontent.com" &&
+                     parsed.Host != "release-assets.githubusercontent.com"))
+                {
+                    throw new InvalidDataException(
+                        "A release completa contém uma URL de download não confiável.");
+                }
+
+                return new FullRelease
+                {
+                    Version = version,
+                    ZipName = name,
+                    DownloadUrl = url,
+                    Sha256 = digest.ToLowerInvariant(),
+                    Size = size
+                };
+            }
+
+            throw new FileNotFoundException(
+                "A release mais recente não possui o pacote full " + expectedName + ".");
+        }
+
+        private static string DownloadText(string url)
+        {
+            EnableTls12();
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.UserAgent = GitHubUserAgent;
+            request.Accept = "application/vnd.github+json";
+            request.Headers["X-GitHub-Api-Version"] = "2022-11-28";
+            using (WebResponse response = request.GetResponse())
+            using (Stream input = response.GetResponseStream())
+            using (MemoryStream output = new MemoryStream())
+            {
+                byte[] buffer = new byte[8192];
+                int read;
+                int total = 0;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    total += read;
+                    if (total > MaximumReleaseResponseBytes)
+                    {
+                        throw new InvalidDataException(
+                            "A resposta da release do GitHub excedeu o tamanho permitido.");
+                    }
+                    output.Write(buffer, 0, read);
+                }
+                return Encoding.UTF8.GetString(output.ToArray());
+            }
+        }
+
+        private static void EnableTls12()
+        {
+            ServicePointManager.SecurityProtocol =
+                ServicePointManager.SecurityProtocol | (SecurityProtocolType)3072;
+        }
+
+        private static string ReadJsonString(string json, string name)
+        {
+            Match match = Regex.Match(
+                json ?? "",
+                "\\\"" + Regex.Escape(name) +
+                "\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"",
+                RegexOptions.Singleline);
+            return match.Success ? Regex.Unescape(match.Groups[1].Value) : null;
+        }
+
+        private static long ReadJsonLong(string json, string name)
+        {
+            Match match = Regex.Match(
+                json ?? "",
+                "\\\"" + Regex.Escape(name) + "\\\"\\s*:\\s*(\\d+)",
+                RegexOptions.Singleline);
+            long result;
+            return match.Success && Int64.TryParse(match.Groups[1].Value, out result)
+                ? result
+                : 0;
+        }
+
+        private static List<string> ExtractJsonObjects(
+            string json,
+            string arrayName)
+        {
+            List<string> result = new List<string>();
+            int property = (json ?? "").IndexOf(
+                "\"" + arrayName + "\"",
+                StringComparison.Ordinal);
+            if (property < 0) return result;
+            int arrayStart = json.IndexOf('[', property);
+            if (arrayStart < 0) return result;
+
+            bool inString = false;
+            bool escaped = false;
+            int depth = 0;
+            int objectStart = -1;
+            for (int index = arrayStart + 1; index < json.Length; index++)
+            {
+                char current = json[index];
+                if (inString)
+                {
+                    if (escaped)
+                    {
+                        escaped = false;
+                    }
+                    else if (current == '\\')
+                    {
+                        escaped = true;
+                    }
+                    else if (current == '\"')
+                    {
+                        inString = false;
+                    }
+                    continue;
+                }
+                if (current == '\"')
+                {
+                    inString = true;
+                }
+                else if (current == '{')
+                {
+                    if (depth == 0) objectStart = index;
+                    depth++;
+                }
+                else if (current == '}')
+                {
+                    if (depth > 0) depth--;
+                    if (depth == 0 && objectStart >= 0)
+                    {
+                        result.Add(json.Substring(
+                            objectStart,
+                            index - objectStart + 1));
+                        objectStart = -1;
+                    }
+                }
+                else if (current == ']' && depth == 0)
+                {
+                    break;
+                }
+            }
+            return result;
+        }
+
+        private static void DownloadFullPackage(
+            FullRelease release,
+            string zipPath,
+            Action<int, long, long> progress)
+        {
+            EnableTls12();
+            string parent = Path.GetDirectoryName(zipPath);
+            if (!Directory.Exists(parent)) Directory.CreateDirectory(parent);
+            using (WebClient client = new WebClient())
+            {
+                client.Headers[HttpRequestHeader.UserAgent] = GitHubUserAgent;
+                client.Headers[HttpRequestHeader.Accept] =
+                    "application/octet-stream";
+                client.DownloadProgressChanged += delegate(
+                    object sender,
+                    DownloadProgressChangedEventArgs eventArgs)
+                {
+                    if (progress != null)
+                    {
+                        progress(
+                            eventArgs.ProgressPercentage,
+                            eventArgs.BytesReceived,
+                            eventArgs.TotalBytesToReceive);
+                    }
+                };
+                client.DownloadFile(release.DownloadUrl, zipPath);
+            }
+
+            FileInfo file = new FileInfo(zipPath);
+            if (!file.Exists || file.Length != release.Size)
+            {
+                throw new InvalidDataException(
+                    "O tamanho do pacote baixado não confere com o GitHub.");
+            }
+            string actualHash;
+            using (FileStream input = File.OpenRead(zipPath))
+            using (SHA256 sha = SHA256.Create())
+            {
+                actualHash = ToHex(sha.ComputeHash(input));
+            }
+            if (!String.Equals(
+                actualHash,
+                release.Sha256,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new CryptographicException(
+                    "O pacote baixado foi alterado ou está corrompido.");
+            }
+            ValidatePackageLayout(zipPath, release.Version);
+        }
+
+        private static string ToHex(byte[] bytes)
+        {
+            StringBuilder builder = new StringBuilder(bytes.Length * 2);
+            foreach (byte value in bytes)
+            {
+                builder.Append(value.ToString("x2"));
+            }
+            return builder.ToString();
+        }
+
+        private static void ValidatePackageLayout(
+            string zipPath,
+            string expectedVersion)
+        {
+            bool hasApplication = false;
+            bool hasUpdater = false;
+            bool hasVersion = false;
+            HashSet<string> names = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            long totalBytes = 0;
+            int entryCount = 0;
+
+            using (ZipArchive archive = ZipFile.OpenRead(zipPath))
+            {
+                foreach (ZipArchiveEntry entry in archive.Entries)
+                {
+                    if (String.IsNullOrEmpty(entry.FullName)) continue;
+                    entryCount++;
+                    if (entryCount > MaximumZipEntries)
+                    {
+                        throw new InvalidDataException(
+                            "O pacote possui entradas demais.");
+                    }
+
+                    string normalized = entry.FullName.Replace('\\', '/');
+                    if (normalized.StartsWith("/", StringComparison.Ordinal) ||
+                        normalized.IndexOf(':') >= 0)
+                    {
+                        throw new InvalidDataException(
+                            "O pacote contém um caminho absoluto inseguro.");
+                    }
+                    string[] parts = normalized.Split('/');
+                    foreach (string part in parts)
+                    {
+                        if (part == ".." || part == ".")
+                        {
+                            throw new InvalidDataException(
+                                "O pacote contém um caminho inseguro: " + entry.FullName);
+                        }
+                    }
+                    if (!names.Add(normalized))
+                    {
+                        throw new InvalidDataException(
+                            "O pacote contém entradas duplicadas: " + normalized);
+                    }
+
+                    bool directory = normalized.EndsWith(
+                        "/",
+                        StringComparison.Ordinal);
+                    if (directory) continue;
+                    totalBytes += entry.Length;
+                    if (totalBytes > MaximumZipBytes)
+                    {
+                        throw new InvalidDataException(
+                            "O conteúdo descompactado do pacote é grande demais.");
+                    }
+                    if (String.Equals(normalized, "TailMsg.exe", StringComparison.OrdinalIgnoreCase))
+                        hasApplication = true;
+                    if (String.Equals(normalized, "TailMsgUpdater.exe", StringComparison.OrdinalIgnoreCase))
+                        hasUpdater = true;
+                    if (String.Equals(normalized, "version.txt", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasVersion = true;
+                        using (Stream input = entry.Open())
+                        using (StreamReader reader = new StreamReader(input, Encoding.UTF8, true))
+                        {
+                            string version = reader.ReadToEnd().Trim();
+                            if (expectedVersion != null &&
+                                !String.Equals(version, expectedVersion, StringComparison.Ordinal))
+                            {
+                                throw new InvalidDataException(
+                                    "A versão dentro do pacote não corresponde à release do GitHub.");
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!hasApplication || !hasUpdater || !hasVersion)
+            {
+                throw new InvalidDataException(
+                    "O pacote full não contém TailMsg.exe, TailMsgUpdater.exe e version.txt.");
+            }
+        }
+
+        private static void ValidateStandaloneTarget(string targetDirectory)
+        {
+            string target = Path.GetFullPath(targetDirectory);
+            string root = Path.GetPathRoot(target);
+            if (String.IsNullOrEmpty(root) ||
+                String.Equals(
+                    target.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Escolha uma pasta específica para o TailMsg; a raiz do disco não é permitida.");
+            }
+
+            Directory.CreateDirectory(target);
+            bool recognizable =
+                File.Exists(Path.Combine(target, "TailMsg.exe")) ||
+                File.Exists(Path.Combine(target, "TailMsgUpdater.exe")) ||
+                File.Exists(Path.Combine(target, "version.txt"));
+            if (!recognizable && Directory.GetFileSystemEntries(target).Length > 0)
+            {
+                throw new InvalidOperationException(
+                    "A pasta escolhida não está vazia e não parece ser uma instalação do TailMsg.");
+            }
+        }
+
+        private static List<int> FindTailMsgProcesses(string targetDirectory)
+        {
+            List<int> result = new List<int>();
+            string applicationPath = Path.GetFullPath(
+                Path.Combine(targetDirectory, "TailMsg.exe"));
+            foreach (Process process in Process.GetProcessesByName("TailMsg"))
+            {
+                try
+                {
+                    if (!process.HasExited &&
+                        String.Equals(
+                            process.MainModule.FileName,
+                            applicationPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Add(process.Id);
+                    }
+                }
+                catch
+                {
+                    // Um processo protegido não pode ser identificado com segurança;
+                    // nesse caso a própria substituição de arquivo dará o erro adequado.
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            }
+            return result;
+        }
+
+        private static bool HasTailMsgRunning(string targetDirectory)
+        {
+            return FindTailMsgProcesses(targetDirectory).Count > 0;
+        }
+
+        private static void CloseTailMsgInTarget(string targetDirectory)
+        {
+            List<int> processIds = FindTailMsgProcesses(targetDirectory);
+            foreach (int processId in processIds)
+            {
+                Process process = null;
+                try
+                {
+                    process = Process.GetProcessById(processId);
+                    if (process.HasExited) continue;
+                    try
+                    {
+                        if (process.MainWindowHandle != IntPtr.Zero)
+                        {
+                            process.CloseMainWindow();
+                        }
+                    }
+                    catch { }
+
+                    if (process.WaitForExit(5000)) continue;
+
+                    // O TailMsg pode estar somente na bandeja e, nesse caso,
+                    // não possuir uma janela principal fechável. A confirmação
+                    // dada na tela do updater autoriza concluir o encerramento.
+                    process.Kill();
+                    if (!process.WaitForExit(5000))
+                    {
+                        throw new TimeoutException(
+                            "O TailMsg não encerrou a tempo para receber a atualização.");
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    // O processo encerrou entre a enumeração e a abertura.
+                }
+                finally
+                {
+                    if (process != null) process.Dispose();
+                }
+            }
+        }
+
+        private static void LaunchStandaloneWorker(
+            string zipPath,
+            string targetDirectory)
+        {
+            string helperDirectory = Path.Combine(
+                Path.GetTempPath(),
+                "TailMsgUpdater-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(helperDirectory);
+            string helperPath = Path.Combine(
+                helperDirectory,
+                "TailMsgUpdater.exe");
+            File.Copy(Application.ExecutablePath, helperPath, true);
+
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = helperPath;
+            info.Arguments =
+                "--standalone-install true" +
+                " --zip " + Quote(zipPath) +
+                " --target " + Quote(targetDirectory);
+            info.WorkingDirectory = targetDirectory;
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            Process.Start(info);
+        }
+
+        private static string Quote(string value)
+        {
+            return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
         }
 
         private static void WaitForApplication(int processId)
@@ -411,6 +923,358 @@ namespace TailMsgUpdater
                     "Parâmetro obrigatório ausente: " + name);
             }
             return value;
+        }
+
+        private sealed class StandaloneUpdaterForm : Form
+        {
+            private readonly TextBox targetBox;
+            private readonly Button checkButton;
+            private readonly Button installButton;
+            private readonly Button browseButton;
+            private readonly ProgressBar progressBar;
+            private readonly Label installedLabel;
+            private readonly Label availableLabel;
+            private readonly Label statusLabel;
+            private FullRelease availableRelease;
+            private bool busy;
+
+            public StandaloneUpdaterForm()
+            {
+                Text = "TailMsg - Atualizador";
+                ClientSize = new Size(620, 300);
+                FormBorderStyle = FormBorderStyle.FixedDialog;
+                MaximizeBox = false;
+                MinimizeBox = false;
+                StartPosition = FormStartPosition.CenterScreen;
+                AutoScaleMode = AutoScaleMode.Font;
+                Font = new Font("Segoe UI", 9F);
+
+                Label title = new Label();
+                title.Text = "Atualizador do TailMsg";
+                title.Font = new Font("Segoe UI Semibold", 17F);
+                title.Location = new Point(18, 14);
+                title.Size = new Size(580, 32);
+                Controls.Add(title);
+
+                Label description = new Label();
+                description.Text =
+                    "Baixe e instale o pacote full mais recente diretamente do GitHub. " +
+                    "Este modo também repara uma instalação cujo executável principal foi perdido.";
+                description.Location = new Point(20, 49);
+                description.Size = new Size(575, 38);
+                description.AutoEllipsis = false;
+                Controls.Add(description);
+
+                Label targetLabel = new Label();
+                targetLabel.Text = "Pasta da instalação:";
+                targetLabel.Location = new Point(20, 99);
+                targetLabel.Size = new Size(125, 22);
+                Controls.Add(targetLabel);
+
+                targetBox = new TextBox();
+                targetBox.Location = new Point(146, 96);
+                targetBox.Size = new Size(365, 24);
+                targetBox.Text = Path.GetDirectoryName(Application.ExecutablePath);
+                Controls.Add(targetBox);
+
+                browseButton = new Button();
+                browseButton.Text = "Procurar...";
+                browseButton.Location = new Point(518, 95);
+                browseButton.Size = new Size(84, 26);
+                browseButton.Click += BrowseClick;
+                Controls.Add(browseButton);
+
+                installedLabel = new Label();
+                installedLabel.Location = new Point(20, 132);
+                installedLabel.Size = new Size(580, 22);
+                Controls.Add(installedLabel);
+
+                availableLabel = new Label();
+                availableLabel.Location = new Point(20, 155);
+                availableLabel.Size = new Size(580, 22);
+                Controls.Add(availableLabel);
+
+                progressBar = new ProgressBar();
+                progressBar.Location = new Point(20, 190);
+                progressBar.Size = new Size(580, 18);
+                progressBar.Minimum = 0;
+                progressBar.Maximum = 100;
+                Controls.Add(progressBar);
+
+                statusLabel = new Label();
+                statusLabel.Location = new Point(20, 214);
+                statusLabel.Size = new Size(580, 22);
+                Controls.Add(statusLabel);
+
+                checkButton = new Button();
+                checkButton.Text = "Verificar atualizações";
+                checkButton.Location = new Point(20, 252);
+                checkButton.Size = new Size(150, 30);
+                checkButton.Click += CheckClick;
+                Controls.Add(checkButton);
+
+                installButton = new Button();
+                installButton.Text = "Baixar e instalar pacote full";
+                installButton.Location = new Point(178, 252);
+                installButton.Size = new Size(205, 30);
+                installButton.Enabled = false;
+                installButton.Click += InstallClick;
+                Controls.Add(installButton);
+
+                Button closeButton = new Button();
+                closeButton.Text = "Fechar";
+                closeButton.Location = new Point(518, 252);
+                closeButton.Size = new Size(84, 30);
+                closeButton.DialogResult = DialogResult.Cancel;
+                Controls.Add(closeButton);
+                CancelButton = closeButton;
+
+                RefreshInstalledVersion();
+                availableLabel.Text = "Versão disponível: consultando o GitHub...";
+                statusLabel.Text = "Aguardando consulta.";
+                Shown += delegate { BeginCheck(); };
+                FormClosing += FormClosingHandler;
+            }
+
+            private string TargetPath()
+            {
+                string value = (targetBox.Text ?? "").Trim();
+                if (value.Length == 0)
+                {
+                    throw new ArgumentException(
+                        "Informe a pasta onde o TailMsg deve ser instalado.");
+                }
+                return Path.GetFullPath(value);
+            }
+
+            private void RefreshInstalledVersion()
+            {
+                try
+                {
+                    string target = TargetPath();
+                    string versionPath = Path.Combine(target, "version.txt");
+                    if (File.Exists(versionPath))
+                    {
+                        string version = File.ReadAllText(versionPath).Trim();
+                        installedLabel.Text = "Versão instalada: " +
+                            (version.Length == 0 ? "não identificada" : version);
+                    }
+                    else if (File.Exists(Path.Combine(target, "TailMsg.exe")) ||
+                             File.Exists(Path.Combine(target, "TailMsgUpdater.exe")))
+                    {
+                        installedLabel.Text = "Versão instalada: não identificada";
+                    }
+                    else
+                    {
+                        installedLabel.Text = "Nenhuma instalação identificada nesta pasta.";
+                    }
+                }
+                catch
+                {
+                    installedLabel.Text = "Pasta da instalação ainda não foi validada.";
+                }
+            }
+
+            private void BrowseClick(object sender, EventArgs args)
+            {
+                if (busy) return;
+                using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+                {
+                    dialog.Description = "Escolha a pasta da instalação do TailMsg";
+                    dialog.ShowNewFolderButton = true;
+                    try { dialog.SelectedPath = TargetPath(); } catch { }
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                    targetBox.Text = dialog.SelectedPath;
+                    RefreshInstalledVersion();
+                }
+            }
+
+            private void CheckClick(object sender, EventArgs args)
+            {
+                BeginCheck();
+            }
+
+            private void BeginCheck()
+            {
+                if (busy) return;
+                availableRelease = null;
+                SetBusy(true, "Consultando a release full mais recente...");
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    try
+                    {
+                        FullRelease release = LoadLatestFullRelease();
+                        PostToUi(delegate
+                        {
+                            availableRelease = release;
+                            availableLabel.Text =
+                                "Versão disponível: " + release.Version + " (" +
+                                FormatSize(release.Size) + ")";
+                            SetBusy(false, "Pacote full pronto para baixar.");
+                        });
+                    }
+                    catch (Exception exception)
+                    {
+                        PostToUi(delegate
+                        {
+                            availableLabel.Text = "Versão disponível: não encontrada.";
+                            SetBusy(false, "Não foi possível consultar o GitHub.");
+                            MessageBox.Show(
+                                this,
+                                "Não foi possível consultar a atualização.\r\n\r\n" +
+                                exception.Message,
+                                "TailMsg - atualizador",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Error);
+                        });
+                    }
+                });
+            }
+
+            private void InstallClick(object sender, EventArgs args)
+            {
+                if (busy || availableRelease == null) return;
+                string target;
+                try
+                {
+                    target = TargetPath();
+                    ValidateStandaloneTarget(target);
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(
+                        this,
+                        exception.Message,
+                        "TailMsg - atualizador",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    return;
+                }
+
+                bool tailMsgRunning = HasTailMsgRunning(target);
+                string runningWarning = tailMsgRunning
+                    ? "O TailMsg está aberto. Se você confirmar, o próprio updater " +
+                      "irá fechá-lo antes de substituir os arquivos.\r\n\r\n"
+                    : "";
+                DialogResult answer = MessageBox.Show(
+                    this,
+                    runningWarning +
+                    "Será baixado e instalado o pacote full " +
+                    availableRelease.Version + ".\r\n\r\n" +
+                    "A instalação será feita na pasta:\r\n" + target +
+                    "\r\n\r\nContinuar?",
+                    "TailMsg - atualizador",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes) return;
+
+                FullRelease release = availableRelease;
+                SetBusy(true, "Preparando o download...");
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string zipPath = Path.Combine(
+                        Path.GetTempPath(),
+                        "TailMsgUpdaterDownloads",
+                        release.Version + ".zip");
+                    try
+                    {
+                        PostToUi(delegate
+                        {
+                            progressBar.Style = ProgressBarStyle.Continuous;
+                            progressBar.Value = 0;
+                            statusLabel.Text = "Baixando o pacote full...";
+                        });
+                        DownloadFullPackage(
+                            release,
+                            zipPath,
+                            delegate(int percent, long received, long total)
+                            {
+                                PostToUi(delegate
+                                {
+                                    progressBar.Style = ProgressBarStyle.Continuous;
+                                    progressBar.Value = Math.Max(0, Math.Min(100, percent));
+                                    statusLabel.Text = "Baixando: " + percent + "% (" +
+                                        FormatSize(received) + " de " +
+                                        FormatSize(total > 0 ? total : release.Size) + ")";
+                                });
+                            });
+                        PostToUi(delegate { statusLabel.Text = "Download validado. Preparando a instalação..."; });
+                        LaunchStandaloneWorker(zipPath, target);
+                        PostToUi(delegate
+                        {
+                            SetBusy(false, "Instalação iniciada. O TailMsg será aberto em instantes.");
+                            Close();
+                        });
+                    }
+                    catch (Exception exception)
+                    {
+                        PostToUi(delegate
+                        {
+                            SetBusy(false, "A instalação não foi iniciada.");
+                            MessageBox.Show(
+                                this,
+                                "Não foi possível baixar ou validar o pacote.\r\n\r\n" +
+                                exception.Message,
+                                "TailMsg - atualizador",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Error);
+                        });
+                    }
+                });
+            }
+
+            private void SetBusy(bool value, string status)
+            {
+                busy = value;
+                checkButton.Enabled = !value;
+                browseButton.Enabled = !value;
+                installButton.Enabled = !value && availableRelease != null;
+                targetBox.Enabled = !value;
+                statusLabel.Text = status;
+                progressBar.Style = value
+                    ? ProgressBarStyle.Marquee
+                    : ProgressBarStyle.Continuous;
+                if (!value && progressBar.Value == 0) progressBar.Value = 0;
+            }
+
+            private void PostToUi(Action action)
+            {
+                try
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    BeginInvoke(new MethodInvoker(delegate { action(); }));
+                }
+                catch { }
+            }
+
+            private void FormClosingHandler(object sender, FormClosingEventArgs args)
+            {
+                if (busy)
+                {
+                    MessageBox.Show(
+                        this,
+                        "Aguarde a operação em andamento terminar.",
+                        "TailMsg - atualizador",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    args.Cancel = true;
+                }
+            }
+
+            private static string FormatSize(long value)
+            {
+                double size = value;
+                string[] units = new string[] { "B", "KB", "MB", "GB" };
+                int index = 0;
+                while (size >= 1024 && index < units.Length - 1)
+                {
+                    size /= 1024;
+                    index++;
+                }
+                return index == 0
+                    ? ((long)size).ToString() + " " + units[index]
+                    : size.ToString("0.0") + " " + units[index];
+            }
         }
     }
 }

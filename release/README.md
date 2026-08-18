@@ -60,11 +60,16 @@ SHA-256 antes de instalar.
 Depois de criar o ZIP, publique com:
 
 ```powershell
-.\release\publish-github-release.ps1 -Version 20260818_002
+.\release\publish-github-release.ps1 -Version 20260818_003
 ```
 
 O repositório configurado atualmente é `spigknot/TailMsg-Windows`.
 O ZIP é sempre full; não há publicação de diff ou incremental no TailMsg.
+
+O `TailMsgUpdater.exe` incluído no ZIP também funciona de forma independente:
+aberto sem parâmetros, ele consulta a release full mais recente, permite
+escolher a pasta de instalação e instala o pacote usando um helper temporário,
+o que permite substituir o próprio updater com segurança.
 
 ## Chaves
 

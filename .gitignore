@@ -1,10 +1,12 @@
 release/update-private-key.xml
+release/r2_config.json
 release/packages/
 release/generated/
 release/staging*/
 release/tailmsg-update.json
 release/version.txt
 dist/
+dist-wine-fix/
 downloads/
 build-validation/
 build-validation-manual/

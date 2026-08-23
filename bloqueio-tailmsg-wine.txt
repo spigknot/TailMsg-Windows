@@ -1,0 +1,160 @@
+=========================================================================
+RELATÓRIO DE BLOQUEIO — TailMsg + Tailscale sob Wine
+=========================================================================
+
+═════════════════════════════════════════════════════════════════════
+PROBLEMA PRINCIPAL
+═════════════════════════════════════════════════════════════════════
+
+Aplicativo C# WinForms (TailMsg.exe) rodando via Wine no Linux (host
+avare) precisa listar os peers conectados na rede Tailscale para
+preencher a lista de destinatários de mensagens.
+
+Fluxo:
+  1. O app procura IPs de peers (faixa 100.64–127.x.x)
+  2. Usa `tailscale status --json` para obter essa lista
+  3. Sem resultado → lista de destinatários fica zerada
+  4. Mensagens TCP ainda são recebidas (listener em 0.0.0.0), mas
+     o usuário nunca consegue escolher o destino correto
+
+═════════════════════════════════════════════════════════════════════
+O QUE JÁ TENTAMOS (SEM SUCESSO)
+═════════════════════════════════════════════════════════════════════
+
+[1] CAMINHOS ABSOLUTOS DO LINUX (/usr/bin/tailscale)
+Passado direto no ProcessStartInfo.FileName = "/usr/bin/tailscale".
+Resultado: "Application could not be started, or no application
+associated with the specified file. ShellExecuteEx failed: File not
+found." — Wine rejeita execução direta de ELF por caminho absoluto.
+
+[2] MAPEAMENTO WINEPATH (Z:\usr\bin\tailscale)
+Campos Wine mapeiam / → Z:\. O binário ELF está em
+Z:\usr\bin\tailscale? Não — o tailscale instalado no Linux não é
+copiado automaticamente para dentro da wineprefix. Resultado: arquivo
+não encontrado.
+
+[3] LISTA DE FALLBACKS MULTIPLOS
+Buscamos vários caminhos Z:\ possíveis: Z:\usr\bin, Z:\usr\sbin,
+Z:\snap\bin, Z:\var\lib\flatpak…, Z:\opt\tailscale… Nenhum existe
+na wineprefix.
+
+[4] COMMANDO "bash -c tailscale status --json"
+Criamos comando ["bash", "-c", "tailscale status --json"]. O bash
+dentro do Wine pode não ter o PATH configurado corretamente para
+encontrar o tailscale. Além disso, há ambiguidade: que bash estamos
+usando — o do Wine ou do host?
+
+[5] REMOÇÃO de /usr/sbin/tailscaled (daemon)
+O daemon tailsale rejeitava subcomandos JSON: "does not take non-flag
+arguments". Foi removido da lista — resolveu parte, mas não trouxe
+resultados positivos.
+
+═════════════════════════════════════════════════════════════════════
+CONFIGURAÇÃO DO AMBIENTE AVARE
+═════════════════════════════════════════════════════════════════════
+
+  Host Linux:    avare (distro não confirmado neste relatório)
+  Wine:          Detectado pelo app (variável definida)
+                Erro wow64 experimental durante startup
+  Tailscale CLI: /usr/bin/tailscale (ELF x86-64, estaticamente linkado, Go BuildID confirmada)
+  Tailscale DMD: /usr/sbin/tailsaled (NÃO serve — não aceita subcomandos)
+  App Path:      ~/.wine/drive_c/Program Files/TailMsg/
+  Executável:    Wine TailMsg.exe --diagnose
+
+  Rede:
+    Física:       10.x.x.x
+    Tailscale:    100.110.211.23 (IP local do host avare)
+    Broadcast:    100.127.255.255 (corrigido)
+    Multicast:    239.255.42.99:38257 (OK)
+
+═════════════════════════════════════════════════════════════════════
+SAÍDA ATUAL (--diagnose)
+═════════════════════════════════════════════════════════════════════
+
+  [1] Interfaces 10.x/100.x encontradas: 1
+      local=100.110.211.23 broadcast=100.127.255.255 mask=255.255.255.255
+
+  [2] Peers Tailscale via 'tailscale status': 0
+      (nenhum binario respondeu)
+
+  [3] UDP loopback: OK
+  [4] Multicast join 239.255.42.99: OK
+  [5] Endpoints usados:
+      100.127.255.255
+      239.255.42.99
+      255.255.255.255
+
+  Conclusão parcial: rede UDP funciona, interface detectada, broadcast
+  calculado corretamente. O gap único restante é a enumeração de peers
+  Tailscale.
+
+═════════════════════════════════════════════════════════════════════
+PRÓXIMO PASSO (a implementar e validar)
+═════════════════════════════════════════════════════════════════════
+
+OBJETIVO: Fazer com que o TailMsg.exe (rodando sob Wine) consiga
+executar o comando `tailsale status --json` e parsear o JSON resultante.
+
+ESTRATÉGIAS PARA TESTAR (em ordem de prioridade):
+
+  A) FORNECER CAMINHO ABSOLUTO AO BASH DO HOST
+     No C#, usar ProcessStartInfo com FileName = "/usr/bin/bash" e
+     Arguments = "-c '/usr/bin/tailscale status --json'". Importante:
+     verificar se, dentro do processo .NET/Wine, o /usr/bin/bash que
+     o Wine encaminha é o bash do host Linux ou um simulacro do Wine.
+     Se for simulacro, precisar de outra abordagem.
+
+  B) USAR BINFMTCONFIG (WINEPREFIX COM binfmt-misc carregado)
+     Verificar se o kernel do host avare tem suporte binfmt_misc para
+     ELF. Isso permitiria que wine/executasse ELF nativo. Testar:
+       $ cat /proc/sys/fs/binfmt_misc/qemu-x86_64  # ou similar
+     Se existir, talvez seja necessário criar uma entry manual apontando
+     para o ELF do tailscale.
+
+  C) CHAMAR O BASH EXTERNO DIRETO, NÃO VIA WINE
+     Criar um helper standalone (script shell .sh ou pequeno binário C)
+     fora da wineprefix que faça o trabalho de chamar tailsale e
+     devolva o JSON via stdout. O TailMsg.exe chamaria esse helper via
+     CreateProcess com caminho absoluto Linux. Ou: escrever um wrapper
+     Python/Ruby que o .NET chame.
+
+  D) INSTALAR VERSION NATIVA DO WINDOWS NO WINEPREFIX
+     Baixar tailscale-setup.exe (https://tailscale.com/download/windows),
+     colocá-lo na wineprefix e instalar normalmente via `wine setup.exe`.
+     Depois o app acharia naturalmente o tailsale.exe. Esta é a solução
+     mais robusta a longo prazo.
+
+  E) USAR API REST INTERNA DO TAILSCALE
+     O cliente Tailscale expõe uma API HTTP local em localhost:45909.
+     Mesmo dentro do Wine, sockets TCP normais devem funcionar. Basta:
+       curl http://localhost:45909/v2/status | jq ...
+     ou fazer requisição HTTP direta do C#.
+
+FERRAMENTAS PARA VERIFICAR ANTES DE IMPLEMENTAR (rodo no avare):
+
+  $ which bash                    # confirmar onde o bash esta
+  $ file $(which bash)            # ELF nativo ou simulacro do wine?
+  $ env PATH                      # o PATH inclui /usr/bin?
+  $ cat /proc/sys/fs/binfmt_misc/qemu-x86_64  # binfmt suportado?
+  $ ls ~/.wine/dosdrive/usr/bin/        # mapeamento Z:\ dentro da prefix
+  $ netstat -tlnp | grep 45909          # API Tailscale aberta?
+
+═════════════════════════════════════════════════════════════════════
+NOTAS ADICIONAIS
+═════════════════════════════════════════════════════════════════════
+
+  • O app detecta interfaces de rede e calcula broadcasts corretamente.
+    UDP loopback e multicast também funcionam.
+
+  • O popup de resposta foi corrigido anteriormente (WS_EX_NOACTIVATE
+    removido sob Wine). O problema atual é exclusivo à descoberta de
+    peers Tailscale.
+
+  • Build do TailMsg.exe foi feito localmente em Windows (.NET FW 4.0).
+    Cada mudança de código requer rebuild completo via build.ps1.
+
+  • Código relevante: TailMsg.cs, classe TailscaleDiscovery (linha ~2608).
+
+  • WARNING: não embutir credenciais/chaves nos arquivos enviados.
+
+=========================================================================

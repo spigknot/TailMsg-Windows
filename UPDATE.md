@@ -31,7 +31,14 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
   - `UpdateConfig.cs` — `CurrentVersion`, `R2PublicBase`, `ManifestFileName`, `GitHubRepository`.
   - `release/update-private-key.xml` — assina os manifestos (NUNCA commitar; NUNCA entrar no ZIP).
   - `release/update-public-key.xml` — incorporada ao executável pelo `build.ps1`.
-- **R2**: bucket `tailmsg`, credenciais no `release/r2_config.json` do projeto **SIG Windows** (MESMA conta Cloudflare; o token tem acesso aos buckets `sig`, `sig-android` e `tailmsg`). URL pública: `https://pub-ce3b9c72c0fa4a2eb8c44a21c6ece860.r2.dev`.
+- **R2**: o destino deste projeto é SEMPRE o bucket `tailmsg`, com URL pública `https://pub-ce3b9c72c0fa4a2eb8c44a21c6ece860.r2.dev`.
+  As credenciais S3 ficam em `release/r2_config.json` local (arquivo ignorado;
+  veja `release/r2_config.example.json`). Se forem copiadas do projeto SIG
+  Windows, copie apenas `endpoint`, `access_key_id` e `secret_access_key`.
+  NÃO reutilize `bucket` ou `public_base` do JSON do SIG: eles podem apontar
+  para `sig`. O upload deste projeto força `bucket = tailmsg`. O token da API
+  Cloudflare (`cfat...`) não é necessário para o upload S3 e nunca deve ser
+  documentado ou commitado.
 
 ## 0.2 Regras obrigatórias (não negociáveis)
 
@@ -51,7 +58,10 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 1. **`gh` autenticado** como `spigknot`: `gh auth status` (se falhar: `gh auth login`).
 2. **PowerShell + compilador .NET Framework 4** (o `build.ps1` usa `csc.exe` do Windows; já está disponível na máquina).
 3. **Chave privada presente**: `release/update-private-key.xml` (sem ela não há manifesto assinado).
-4. **Credenciais R2**: no `release/r2_config.json` do projeto **SIG Windows** (copiar as credenciais de lá — mesma conta, buckets diferentes). Se o token não tiver acesso ao bucket `tailmsg`, editar o token no painel da Cloudflare (escopo "todos os buckets").
+4. **Credenciais R2**: manter o `release/r2_config.json` local deste projeto
+   (copiar somente `endpoint`, `access_key_id` e `secret_access_key` da chave
+   dedicada ao bucket `tailmsg`). O arquivo é ignorado pelo Git. Se o token não
+   tiver acesso ao bucket `tailmsg`, editar a chave no painel da Cloudflare.
 5. **Python com boto3** para o upload R2 (o venv do Hermes tem; usar o mesmo comando dos exemplos abaixo).
 
 ## 2. Bump da versão
@@ -91,12 +101,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File release/sign-manifest.ps
 ```bash
 cd "D:/Projetos/TailMsg"
 python -c "
-import boto3
+import json, boto3
 from botocore.config import Config
-cfg = {'account_id': '0c3bebed8def676eb7d77371a7b0330e', 'access_key_id': '<KEY>', 'secret_access_key': '<SECRET>'}
-client = boto3.client('s3', endpoint_url=f'https://{cfg[\"account_id\"]}.r2.cloudflarestorage.com', aws_access_key_id=cfg['access_key_id'], aws_secret_access_key=cfg['secret_access_key'], config=Config(signature_version='s3v4'), region_name='auto')
-client.upload_file('release/packages/YYYYMMDD_NNN.zip', 'tailmsg', 'YYYYMMDD_NNN.zip', ExtraArgs={'ContentType': 'application/zip'})
-client.upload_file('release/tailmsg-update.json', 'tailmsg', 'tailmsg-update.json', ExtraArgs={'ContentType': 'application/json'})
+cfg = json.load(open('release/r2_config.json', encoding='utf-8'))
+client = boto3.client('s3', endpoint_url=cfg['endpoint'], aws_access_key_id=cfg['access_key_id'], aws_secret_access_key=cfg['secret_access_key'], config=Config(signature_version='s3v4'), region_name='auto')
+bucket = 'tailmsg'  # NÃO usar cfg.get('bucket'): a config do SIG pode apontar para sig
+client.upload_file('release/packages/YYYYMMDD_NNN.zip', bucket, 'YYYYMMDD_NNN.zip', ExtraArgs={'ContentType': 'application/zip'})
+client.upload_file('release/tailmsg-update.json', bucket, 'tailmsg-update.json', ExtraArgs={'ContentType': 'application/json'})
 print('subiu ZIP + manifesto')
 "
 ```
@@ -183,6 +194,7 @@ a fonte da verdade e deve evoluir com a prática.
 | App antigo (antes da migração) não vê a versão nova | versões antigas consultam Drive + GitHub | o GitHub já existia como canal — manter a release do GitHub publicada; o Drive fica congelado na última versão publicada lá |
 | `no matches found for C:/...` no `gh` | shell MSYS trata `C:/` como glob | `cd` no diretório e usar caminhos relativos |
 | Upload R2 com URL pública 404 | objeto não subiu ou nome divergente | listar o bucket (`list_objects_v2`) e conferir o nome exato; verificar se o R2.dev subdomain está habilitado no bucket |
+| `Upload aparece no bucket sig, mas não no TailMsg` | foi reutilizado `cfg['bucket']` do JSON compartilhado do SIG | copiar somente as credenciais S3 e forçar `bucket = tailmsg`; conferir também a URL pública `pub-ce3b9c72...r2.dev` |
 | `gh release create` falha e release fica em draft | upload interrompido | `gh release edit YYYYMMDD_NNN --repo spigknot/TailMsg-Windows --draft=false` |
 | ZIP publicado no R2 com SHA divergente do manifesto | subiu arquivo errado (ex.: rezip local) | SEMPRE usar o ZIP de `release/packages/` gerado pelo `package-release.ps1`; conferir SHA antes do upload |
 

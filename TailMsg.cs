@@ -27,6 +27,12 @@ namespace TailMsg
                 return;
             }
 
+            if (args.Length >= 1 && args[0] == "--diagnose")
+            {
+                RunDiagnostics(args.Length >= 2 ? args[1] : null);
+                return;
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
@@ -79,6 +85,174 @@ namespace TailMsg
             }
 
             Console.WriteLine("OK - protocolo e filtros de endereço funcionando.");
+        }
+
+        private static void RunDiagnostics(string remoteAddressArg)
+        {
+            bool consoleAvailable = true;
+            try
+            {
+                Console.Write("");
+            }
+            catch
+            {
+                consoleAvailable = false;
+            }
+
+            StringBuilder report = new StringBuilder();
+            report.AppendLine("TailMsg --diagnose (Windows/" +
+                Environment.OSVersion.VersionString + ")");
+            report.AppendLine("Wine detectado: " + (WineEnvironment.IsWine ? "SIM" : "nao"));
+            report.AppendLine();
+
+            List<NetworkEndpoint> endpoints = NetworkDiscovery.GetEndpoints();
+            report.AppendLine("[1] Interfaces 10.x/100.x encontradas: " + endpoints.Count);
+            foreach (NetworkEndpoint endpoint in endpoints)
+            {
+                report.AppendLine("    local=" + endpoint.LocalAddress +
+                    " broadcast=" + (endpoint.BroadcastAddress ?? "-") +
+                    " mask=" + (endpoint.Mask ?? "-"));
+            }
+            if (endpoints.Count == 0)
+            {
+                report.AppendLine("    AVISO: nenhuma interface elegivel -> a descoberta nao" +
+                    " envia pacotes e a lista fica vazia.");
+            }
+
+            List<IPAddress> tailscalePeers = TailscaleDiscovery.FindPeerAddresses();
+            report.AppendLine("[2] Peers Tailscale via 'tailscale status': " + tailscalePeers.Count +
+                (tailscalePeers.Count > 0
+                    ? " (fonte: " + TailscaleDiscovery.LastSuccessSource + ")"
+                    : ""));
+            if (WineEnvironment.IsWine)
+            {
+                report.AppendLine("    Tentativa Wine: " +
+                    (TailscaleDiscovery.LastAttemptSummary ?? "-"));
+            }
+            foreach (IPAddress peer in tailscalePeers)
+            {
+                report.AppendLine("    " + peer);
+            }
+            if (tailscalePeers.Count == 0 && WineEnvironment.IsWine)
+            {
+                report.AppendLine("    DICA: se o Tailscale estiver instalado no Linux," +
+                    " execute novamente com --diagnose e verifique 'which tailscale'" +
+                    " e a permissao da LocalAPI no Linux.");
+            }
+
+            bool udpLoopback = false;
+            string udpError = "";
+            try
+            {
+                using (UdpClient listener = new UdpClient(0))
+                {
+                    IPEndPoint bound = (IPEndPoint)listener.Client.LocalEndPoint;
+                    listener.Client.ReceiveTimeout = 1500;
+                    byte[] payload = Encoding.UTF8.GetBytes("tailmsg-diag");
+                    listener.EnableBroadcast = true;
+                    listener.Send(payload, payload.Length, "127.0.0.1", bound.Port);
+                    IPEndPoint source = new IPEndPoint(IPAddress.Any, 0);
+                    byte[] received = listener.Receive(ref source);
+                    udpLoopback = Encoding.UTF8.GetString(received) == "tailmsg-diag";
+                }
+            }
+            catch (Exception exception)
+            {
+                udpError = exception.Message;
+            }
+            report.AppendLine("[3] UDP loopback (bind/send/receive): " +
+                (udpLoopback ? "OK" : "FALHOU" +
+                    (udpError.Length > 0 ? " - " + udpError : "")));
+
+            bool multicastJoin = false;
+            string multicastError = "";
+            try
+            {
+                using (UdpClient multicast = new UdpClient(0))
+                {
+                    IPAddress joinAddress = IPAddress.Parse(NetworkService.DiscoveryMulticast);
+                    if (endpoints.Count > 0)
+                    {
+                        multicast.JoinMulticastGroup(
+                            joinAddress,
+                            IPAddress.Parse(endpoints[0].LocalAddress));
+                    }
+                    else
+                    {
+                        multicast.JoinMulticastGroup(joinAddress);
+                    }
+                    multicastJoin = true;
+                }
+            }
+            catch (Exception exception)
+            {
+                multicastError = exception.Message;
+            }
+            report.AppendLine("[4] Multicast join " + NetworkService.DiscoveryMulticast + ": " +
+                (multicastJoin ? "OK" : "FALHOU - " + multicastError));
+
+            report.AppendLine("[5] Endpoints de descoberta usados pela GUI:");
+            foreach (IPAddress target in NetworkDiscovery.GetDiscoveryTargets())
+            {
+                report.AppendLine("    " + target);
+            }
+
+            if (!String.IsNullOrEmpty(remoteAddressArg))
+            {
+                IPAddress remote;
+                if (IPAddress.TryParse(remoteAddressArg, out remote))
+                {
+                    string tcpError = "";
+                    bool tcpOk = false;
+                    try
+                    {
+                        using (TcpClient probe = new TcpClient())
+                        {
+                            IAsyncResult connection = probe.BeginConnect(remote, NetworkService.TcpPort, null, null);
+                            tcpOk = connection.AsyncWaitHandle.WaitOne(3000);
+                            if (tcpOk)
+                            {
+                                probe.EndConnect(connection);
+                            }
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        tcpError = exception.Message;
+                    }
+                    report.AppendLine("[6] TCP " + remoteAddressArg + ":" + NetworkService.TcpPort +
+                        " (porta de mensagem): " + (tcpOk ? "ABERTA" : "SEM RESPOSTA" +
+                        (tcpError.Length > 0 ? " - " + tcpError : "")));
+                }
+                else
+                {
+                    report.AppendLine("[6] Endereco invalido para o teste TCP: " + remoteAddressArg);
+                }
+            }
+            else
+            {
+                report.AppendLine("[6] Teste TCP pulado. Para testar, execute:" +
+                    " TailMsg.exe --diagnose 10.x.x.x");
+            }
+
+            string reportText = report.ToString();
+            if (consoleAvailable)
+            {
+                Console.Write(reportText);
+            }
+
+            try
+            {
+                string logPath = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "tailmsg-diagnose.txt");
+                File.WriteAllText(logPath, reportText, Encoding.UTF8);
+                if (consoleAvailable)
+                {
+                    Console.WriteLine("Relatorio salvo em: " + logPath);
+                }
+            }
+            catch { }
         }
     }
 
@@ -1415,10 +1589,43 @@ namespace TailMsg
 
     }
 
+    internal static class WineEnvironment
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetModuleHandle(string moduleName);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetProcAddress(IntPtr module, string procedureName);
+
+        private static readonly bool isWine = DetectOnce();
+
+        public static bool IsWine
+        {
+            get { return isWine; }
+        }
+
+        // Detecta execução sob Wine/Mono procurando o export
+        // wine_get_version na ntdll. Em Windows nativo ele não existe.
+        private static bool DetectOnce()
+        {
+            try
+            {
+                IntPtr module = GetModuleHandle("ntdll.dll");
+                if (module == IntPtr.Zero) return false;
+                return GetProcAddress(module, "wine_get_version") != IntPtr.Zero;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
     internal sealed class ReceivedMessageForm : Form
     {
         private const int WsExNoActivate = 0x08000000;
         private const int WsExToolWindow = 0x00000080;
+        private static readonly bool runningUnderWine = WineEnvironment.IsWine;
         private readonly MessageReceivedEventArgs message;
         private readonly string localComputerName;
         private readonly Action openMainWindow;
@@ -1664,7 +1871,7 @@ namespace TailMsg
 
         protected override bool ShowWithoutActivation
         {
-            get { return true; }
+            get { return !runningUnderWine; }
         }
 
         protected override CreateParams CreateParams
@@ -1672,7 +1879,14 @@ namespace TailMsg
             get
             {
                 CreateParams parameters = base.CreateParams;
-                parameters.ExStyle |= WsExNoActivate | WsExToolWindow;
+                // No Wine, WS_EX_NOACTIVATE impede o clique nos campos de
+                // resposta do popup; sem ele o popup rouba o foco, mas
+                // permanece interativo.
+                if (!runningUnderWine)
+                {
+                    parameters.ExStyle |= WsExNoActivate;
+                }
+                parameters.ExStyle |= WsExToolWindow;
                 return parameters;
             }
         }
@@ -1855,6 +2069,36 @@ namespace TailMsg
 
                     udpClient = new UdpClient(DiscoveryPort);
                     udpClient.EnableBroadcast = true;
+
+                    // Participa do grupo de multicast de descoberta para
+                    // responder a requisições que chegam por ele.
+                    try
+                    {
+                        IPAddress multicastAddress = IPAddress.Parse(DiscoveryMulticast);
+                        foreach (NetworkEndpoint endpoint in NetworkDiscovery.GetEndpoints())
+                        {
+                            try
+                            {
+                                udpClient.Client.SetSocketOption(
+                                    SocketOptionLevel.IP,
+                                    SocketOptionName.AddMembership,
+                                    new MulticastOption(
+                                        multicastAddress,
+                                        IPAddress.Parse(endpoint.LocalAddress)));
+                            }
+                            catch { }
+                        }
+                        try
+                        {
+                            udpClient.Client.SetSocketOption(
+                                SocketOptionLevel.IP,
+                                SocketOptionName.AddMembership,
+                                new MulticastOption(multicastAddress));
+                        }
+                        catch { }
+                    }
+                    catch { }
+
                     lastError = null;
                     break;
                 }
@@ -2053,6 +2297,10 @@ namespace TailMsg
                 SendPacket(data, address, sent);
             }
 
+            // Broadcast limitado: alcança a rede local mesmo quando a
+            // enumeração de interfaces não funciona (Wine/Mono).
+            SendPacket(data, IPAddress.Parse("255.255.255.255"), sent);
+
             // Alguns ambientes Tailscale permitem multicast na interface; é
             // barato tentar e ajuda quando o executável tailscale.exe não está no PATH.
             SendPacket(data, IPAddress.Parse(DiscoveryMulticast), sent);
@@ -2142,6 +2390,12 @@ namespace TailMsg
                 result.Add(multicast);
             }
 
+            IPAddress limitedBroadcast = IPAddress.Parse("255.255.255.255");
+            if (addresses.Add(limitedBroadcast.ToString()))
+            {
+                result.Add(limitedBroadcast);
+            }
+
             return result;
         }
 
@@ -2182,8 +2436,10 @@ namespace TailMsg
             {
                 foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
                 {
-                    if (adapter.OperationalStatus != OperationalStatus.Up ||
-                        adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                    // De propósito não filtra por OperationalStatus: Wine/Mono
+                    // pode reportar estados inesperados; basta ter um endereço
+                    // 10.x/100.x associado à interface.
+                    if (adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback)
                     {
                         continue;
                     }
@@ -2197,10 +2453,11 @@ namespace TailMsg
                             continue;
                         }
 
+                        IPAddress mask = GetMask(unicast);
                         NetworkEndpoint endpoint = new NetworkEndpoint();
                         endpoint.LocalAddress = unicast.Address.ToString();
-                        endpoint.BroadcastAddress = GetBroadcast(unicast.Address, unicast.IPv4Mask);
-                        endpoint.Mask = unicast.IPv4Mask == null ? null : unicast.IPv4Mask.ToString();
+                        endpoint.BroadcastAddress = GetBroadcast(unicast.Address, mask);
+                        endpoint.Mask = mask == null ? null : mask.ToString();
                         result.Add(endpoint);
                     }
                 }
@@ -2212,6 +2469,68 @@ namespace TailMsg
             }
 
             return result;
+        }
+
+        private static IPAddress GetMask(UnicastIPAddressInformation unicast)
+        {
+            try
+            {
+                IPAddress mask = unicast.IPv4Mask;
+                if (mask != null && !mask.Equals(IPAddress.Any))
+                {
+                    return mask;
+                }
+            }
+            catch
+            {
+                // Mono/Wine pode não expor a máscara por esta propriedade.
+            }
+
+            // IPv4PrefixLength existe no Mono/.NET 4.5+ mas não no .NET
+            // Framework 4.0 usado na compilação; acessamos via reflexão para
+            // funcionar em qualquer runtime.
+            try
+            {
+                System.Reflection.PropertyInfo property = unicast.GetType()
+                    .GetProperty("IPv4PrefixLength");
+                if (property != null)
+                {
+                    int prefix = Convert.ToInt32(property.GetValue(unicast, null));
+                    if (prefix > 0 && prefix <= 32)
+                    {
+                        uint value = prefix == 32 ?
+                            0xFFFFFFFFu :
+                            (0xFFFFFFFFu << (32 - prefix));
+                        byte[] bytes = new byte[]
+                        {
+                            (byte)((value >> 24) & 0xFF),
+                            (byte)((value >> 16) & 0xFF),
+                            (byte)((value >> 8) & 0xFF),
+                            (byte)(value & 0xFF)
+                        };
+                        return new IPAddress(bytes);
+                    }
+                }
+            }
+            catch
+            {
+                // Prefixo indisponível neste ambiente.
+            }
+
+            // Último recurso: máscara clássica da faixa, para não perder o
+            // broadcast de descoberta quando o ambiente (Wine/Mono antigo)
+            // não expõe máscara nem prefixo.
+            byte[] addressBytes = unicast.Address.GetAddressBytes();
+            if (addressBytes.Length == 4 && addressBytes[0] == 10)
+            {
+                return IPAddress.Parse("255.0.0.0");
+            }
+            if (addressBytes.Length == 4 && addressBytes[0] == 100 &&
+                addressBytes[1] >= 64 && addressBytes[1] <= 127)
+            {
+                return IPAddress.Parse("255.192.0.0");
+            }
+            return null;
         }
 
         public static string FindBestLocalAddress(IPAddress remote)
@@ -2250,14 +2569,44 @@ namespace TailMsg
             byte[] ip = address.GetAddressBytes();
             byte[] subnet = mask.GetAddressBytes();
             if (ip.Length != 4 || subnet.Length != 4) return null;
-            byte[] broadcast = new byte[4];
-            bool hasHostBits = false;
+
+            // Verifica se mascara/equal ao IP -> prefixo /32 (sem bits de host).
+            // Broadcast normal fica nulo; usa-se broadcast subnet dedicado.
+            bool isHostOnly = true;
             for (int index = 0; index < 4; index++)
             {
-                broadcast[index] = (byte)(ip[index] | (byte)~subnet[index]);
-                if (broadcast[index] != ip[index]) hasHostBits = true;
+                if (subnet[index] != 0xFF)
+                {
+                    isHostOnly = false;
+                    break;
+                }
             }
-            return hasHostBits ? new IPAddress(broadcast).ToString() : null;
+            if (!isHostOnly)
+            {
+                byte[] broadcast = new byte[4];
+                bool hasHostBits = false;
+                for (int index = 0; index < 4; index++)
+                {
+                    broadcast[index] = (byte)(ip[index] | (byte)~subnet[index]);
+                    if (broadcast[index] != ip[index]) hasHostBits = true;
+                }
+                return hasHostBits ? new IPAddress(broadcast).ToString() : null;
+            }
+
+            // Mascara /32: interface point-to-point (ex.: Tailscale).
+            // Usa broadcast subnet da faixa 100.x/10 (.5) ou 10.x/8.
+            // Alcaca todos os peers naquela sub-rede mesmo sem rotas L2 completas.
+            if (ip[0] == 100 && ip[1] >= 64 && ip[1] <= 127)
+            {
+                // Rede 100.64.0.0/10 -> broadcast 100.127.255.255
+                return "100.127.255.255";
+            }
+            if (ip[0] == 10)
+            {
+                // Rede 10.0.0.0/8 -> broadcast 10.255.255.255
+                return "10.255.255.255";
+            }
+            return null;
         }
     }
 
@@ -2267,30 +2616,57 @@ namespace TailMsg
             @"\b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}\b",
             RegexOptions.Compiled);
 
+        private static readonly object wineCacheLock = new object();
+        private static List<IPAddress> wineCachedAddresses = new List<IPAddress>();
+        private static DateTime wineCacheExpiresUtc = DateTime.MinValue;
+        private static volatile string lastAttemptSummary = "";
+        private static int wineCommandSequence;
+
+        private static volatile string lastSuccessSource = "";
+
+        public static string LastSuccessSource
+        {
+            get { return lastSuccessSource; }
+        }
+
+        public static string LastAttemptSummary
+        {
+            get { return lastAttemptSummary; }
+        }
+
         public static List<IPAddress> FindPeerAddresses()
         {
             List<IPAddress> addresses = new List<IPAddress>();
-            List<string> commands = new List<string>();
-            commands.Add("tailscale.exe");
-            commands.Add("tailscale");
+
+            if (WineEnvironment.IsWine)
+            {
+                List<IPAddress> wineAddresses = FindWinePeerAddresses();
+                if (wineAddresses.Count > 0)
+                    return wineAddresses;
+            }
+
+            // --- Estrategia Windows nativo: buscar tailscale.exe nos locais padrao ---
+            List<string> windowsCommands = new List<string>();
+            windowsCommands.Add("tailscale.exe");
+            windowsCommands.Add("tailscale");
 
             string programFiles = Environment.GetEnvironmentVariable("ProgramFiles");
             string programFiles64 = Environment.GetEnvironmentVariable("ProgramW6432");
             if (!String.IsNullOrEmpty(programFiles))
             {
-                commands.Add(Path.Combine(programFiles, "Tailscale\\tailscale.exe"));
+                windowsCommands.Add(Path.Combine(programFiles, "Tailscale\\tailscale.exe"));
             }
             if (!String.IsNullOrEmpty(programFiles64) && programFiles64 != programFiles)
             {
-                commands.Add(Path.Combine(programFiles64, "Tailscale\\tailscale.exe"));
+                windowsCommands.Add(Path.Combine(programFiles64, "Tailscale\\tailscale.exe"));
             }
 
-            foreach (string command in commands)
+            foreach (string cmd in windowsCommands)
             {
                 try
                 {
                     ProcessStartInfo info = new ProcessStartInfo();
-                    info.FileName = command;
+                    info.FileName = cmd;
                     info.Arguments = "status --json";
                     info.UseShellExecute = false;
                     info.CreateNoWindow = true;
@@ -2300,7 +2676,10 @@ namespace TailMsg
                     using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(info))
                     {
                         string output = process.StandardOutput.ReadToEnd();
-                        process.WaitForExit(2500);
+                        string stderr = process.StandardError.ReadToEnd();
+                        process.WaitForExit(3000);
+                        output += stderr;
+
                         foreach (Match match in AddressPattern.Matches(output))
                         {
                             IPAddress address;
@@ -2311,15 +2690,364 @@ namespace TailMsg
                         }
                     }
 
-                    if (addresses.Count > 0) return addresses;
+                    if (addresses.Count > 0)
+                    {
+                        lastSuccessSource = cmd;
+                        return addresses;
+                    }
                 }
-                catch
-                {
-                    // Tailscale pode não estar instalado ou o comando pode não estar no PATH.
-                }
+                catch { }
             }
 
             return addresses;
+        }
+
+        private static List<IPAddress> FindWinePeerAddresses()
+        {
+            lock (wineCacheLock)
+            {
+                if (DateTime.UtcNow < wineCacheExpiresUtc)
+                    return new List<IPAddress>(wineCachedAddresses);
+
+                List<IPAddress> addresses = new List<IPAddress>();
+                StringBuilder attempts = new StringBuilder();
+                lastSuccessSource = "";
+
+                string configuredBinary = Environment.GetEnvironmentVariable("TAILMSG_TAILSCALE_BIN");
+                List<string> binaries = new List<string>();
+                if (!String.IsNullOrEmpty(configuredBinary))
+                    binaries.Add(configuredBinary);
+                binaries.Add("/usr/bin/tailscale");
+                binaries.Add("/usr/local/bin/tailscale");
+                binaries.Add("/snap/bin/tailscale");
+
+                string configuredBash = Environment.GetEnvironmentVariable("TAILMSG_WINE_BASH");
+                List<string> shells = new List<string>();
+                if (!String.IsNullOrEmpty(configuredBash))
+                    shells.Add(configuredBash);
+                shells.Add("/usr/bin/bash");
+                shells.Add("/bin/bash");
+
+                foreach (string shell in UniqueStrings(shells))
+                {
+                    foreach (string binary in UniqueStrings(binaries))
+                    {
+                        string output;
+                        string command = "exec " + ShellQuote(binary) + " status --json";
+                        if (TryRunWineUnixShell(shell, command, out output))
+                        {
+                            int found = AddAddressesFromOutput(output, addresses);
+                            if (found > 0)
+                            {
+                                lastSuccessSource = "Wine start /unix: " + binary;
+                                lastAttemptSummary = lastSuccessSource;
+                                wineCachedAddresses = new List<IPAddress>(addresses);
+                                wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                                return new List<IPAddress>(addresses);
+                            }
+                            AppendAttempt(attempts, shell + " + " + binary +
+                                " respondeu sem IP Tailscale");
+                        }
+                        else
+                        {
+                            AppendAttempt(attempts, shell + " + " + binary + " falhou");
+                        }
+                    }
+
+                    // Permite que o PATH do host seja usado quando o Tailscale
+                    // estiver instalado fora dos caminhos usuais.
+                    string pathOutput;
+                    if (TryRunWineUnixShell(
+                        shell,
+                        "command -v tailscale >/dev/null 2>&1 && exec tailscale status --json",
+                        out pathOutput))
+                    {
+                        int found = AddAddressesFromOutput(pathOutput, addresses);
+                        if (found > 0)
+                        {
+                            lastSuccessSource = "Wine start /unix: PATH do host";
+                            lastAttemptSummary = lastSuccessSource;
+                            wineCachedAddresses = new List<IPAddress>(addresses);
+                            wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                            return new List<IPAddress>(addresses);
+                        }
+                        AppendAttempt(attempts, shell + " + PATH respondeu sem IP Tailscale");
+                    }
+                    else
+                    {
+                        AppendAttempt(attempts, shell + " + PATH falhou");
+                    }
+                }
+
+                // Fallback opcional: algumas instalações expõem a LocalAPI TCP
+                // apenas para clientes locais. A URL pode ser substituída por
+                // TAILMSG_TAILSCALE_API; nenhum comportamento Windows passa por
+                // este bloco.
+                string apiSource;
+                if (TryReadWineLocalApi(addresses, out apiSource))
+                {
+                    lastSuccessSource = apiSource;
+                    lastAttemptSummary = apiSource;
+                    wineCachedAddresses = new List<IPAddress>(addresses);
+                    wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                    return new List<IPAddress>(addresses);
+                }
+
+                lastAttemptSummary = attempts.Length == 0
+                    ? "Wine: nenhuma estratégia executada"
+                    : "Wine: " + attempts.ToString();
+                wineCachedAddresses = new List<IPAddress>();
+                wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                return new List<IPAddress>();
+            }
+        }
+
+        private static bool TryRunWineUnixShell(
+            string unixShell,
+            string shellCommand,
+            out string output)
+        {
+            output = "";
+            string fileName = "tailmsg-tailscale-" +
+                Process.GetCurrentProcess().Id + "-" +
+                Interlocked.Increment(ref wineCommandSequence) + ".out";
+            string unixOutputPath = "/tmp/" + fileName;
+            string wineOutputPath = @"Z:\tmp\" + fileName;
+            string marker = "TAILMSG_DONE_" + fileName;
+            string redirectedCommand = shellCommand +
+                " > " + ShellQuote(unixOutputPath) +
+                " 2>&1; printf '\\n" + marker + "\\n' >> " +
+                ShellQuote(unixOutputPath);
+
+            try
+            {
+                DeleteIfExists(wineOutputPath);
+                DeleteIfExists(unixOutputPath);
+
+                ProcessStartInfo info = new ProcessStartInfo();
+                info.FileName = GetWineStartPath();
+                info.Arguments = "/wait /unix " + QuoteCommandLine(unixShell) +
+                    " -c " + QuoteCommandLine(redirectedCommand);
+                info.UseShellExecute = false;
+                info.CreateNoWindow = true;
+
+                using (Process process = Process.Start(info))
+                {
+                    DateTime deadline = DateTime.UtcNow.AddMilliseconds(5000);
+                    string content = "";
+                    bool completed = false;
+                    while (DateTime.UtcNow < deadline)
+                    {
+                        content = ReadWineOutput(wineOutputPath, unixOutputPath);
+                        int markerIndex = content.IndexOf(marker, StringComparison.Ordinal);
+                        if (markerIndex >= 0)
+                        {
+                            output = content.Substring(0, markerIndex);
+                            completed = true;
+                            break;
+                        }
+
+                        if (process.HasExited)
+                        {
+                            // start.exe pode retornar antes da gravação final
+                            // do arquivo; dê uma pequena janela ao shell host.
+                            Thread.Sleep(100);
+                            content = ReadWineOutput(wineOutputPath, unixOutputPath);
+                            markerIndex = content.IndexOf(marker, StringComparison.Ordinal);
+                            if (markerIndex >= 0)
+                            {
+                                output = content.Substring(0, markerIndex);
+                                completed = true;
+                            }
+                            break;
+                        }
+
+                        Thread.Sleep(50);
+                    }
+
+                    if (!process.HasExited)
+                    {
+                        try { process.Kill(); } catch { }
+                    }
+
+                    if (!completed)
+                    {
+                        output = ReadWineOutput(wineOutputPath, unixOutputPath);
+                    }
+                }
+
+                return output.Length > 0;
+            }
+            catch (Exception exception)
+            {
+                lastAttemptSummary = "Wine: " + exception.Message;
+                return false;
+            }
+            finally
+            {
+                DeleteIfExists(wineOutputPath);
+                DeleteIfExists(unixOutputPath);
+            }
+        }
+
+        private static bool TryReadWineLocalApi(
+            List<IPAddress> addresses,
+            out string source)
+        {
+            source = "";
+            string configuredUrl = Environment.GetEnvironmentVariable("TAILMSG_TAILSCALE_API");
+            List<string> urls = new List<string>();
+            if (!String.IsNullOrEmpty(configuredUrl))
+            {
+                if (configuredUrl.EndsWith("/status", StringComparison.OrdinalIgnoreCase))
+                {
+                    urls.Add(configuredUrl);
+                }
+                else
+                {
+                    urls.Add(configuredUrl.TrimEnd('/') + "/localapi/v0/status");
+                    urls.Add(configuredUrl.TrimEnd('/') + "/v2/status");
+                }
+            }
+            else
+            {
+                urls.Add("http://127.0.0.1:45909/localapi/v0/status");
+                urls.Add("http://127.0.0.1:45909/v2/status");
+            }
+
+            string token = Environment.GetEnvironmentVariable("TAILMSG_TAILSCALE_API_TOKEN");
+            string authorization = Environment.GetEnvironmentVariable("TAILMSG_TAILSCALE_API_AUTH");
+            if (String.IsNullOrEmpty(authorization) && !String.IsNullOrEmpty(token))
+            {
+                authorization = "Basic " + Convert.ToBase64String(
+                    Encoding.ASCII.GetBytes(":" + token));
+            }
+
+            foreach (string url in UniqueStrings(urls))
+            {
+                try
+                {
+                    HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+                    request.Method = "GET";
+                    request.Proxy = null;
+                    request.AllowAutoRedirect = false;
+                    request.Timeout = 900;
+                    request.ReadWriteTimeout = 900;
+                    if (!String.IsNullOrEmpty(authorization))
+                        request.Headers["Authorization"] = authorization;
+
+                    using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                    using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                    {
+                        int found = AddAddressesFromOutput(reader.ReadToEnd(), addresses);
+                        if (found > 0)
+                        {
+                            source = "Wine LocalAPI: " + url;
+                            return true;
+                        }
+                    }
+                }
+                catch
+                {
+                    // A LocalAPI protegida ou inexistente não deve impedir
+                    // as tentativas pelo CLI do host.
+                }
+            }
+
+            return false;
+        }
+
+        private static int AddAddressesFromOutput(string output, List<IPAddress> addresses)
+        {
+            int found = 0;
+            foreach (Match match in AddressPattern.Matches(output ?? ""))
+            {
+                IPAddress address;
+                if (IPAddress.TryParse(match.Value, out address) && !Contains(addresses, address))
+                {
+                    addresses.Add(address);
+                    found++;
+                }
+            }
+            return found;
+        }
+
+        private static string GetWineStartPath()
+        {
+            string systemDirectory = Environment.SystemDirectory;
+            if (!String.IsNullOrEmpty(systemDirectory))
+            {
+                string startPath = Path.Combine(systemDirectory, "start.exe");
+                if (File.Exists(startPath))
+                    return startPath;
+            }
+            return "start.exe";
+        }
+
+        private static string ShellQuote(string value)
+        {
+            return "'" + (value ?? "").Replace("'", "'\\''") + "'";
+        }
+
+        private static string QuoteCommandLine(string value)
+        {
+            return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
+        }
+
+        private static string ReadIfExists(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    return File.ReadAllText(path, Encoding.UTF8);
+            }
+            catch { }
+            return "";
+        }
+
+        private static string ReadWineOutput(string winePath, string unixPath)
+        {
+            string content = ReadIfExists(winePath);
+            return content.Length > 0 ? content : ReadIfExists(unixPath);
+        }
+
+        private static void DeleteIfExists(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch { }
+        }
+
+        private static List<string> UniqueStrings(List<string> values)
+        {
+            List<string> result = new List<string>();
+            foreach (string value in values)
+            {
+                bool alreadyPresent = false;
+                foreach (string existing in result)
+                {
+                    if (String.Equals(existing, value, StringComparison.OrdinalIgnoreCase))
+                    {
+                        alreadyPresent = true;
+                        break;
+                    }
+                }
+                if (!String.IsNullOrEmpty(value) && !alreadyPresent)
+                {
+                    result.Add(value);
+                }
+            }
+            return result;
+        }
+
+        private static void AppendAttempt(StringBuilder attempts, string value)
+        {
+            if (attempts.Length > 0)
+                attempts.Append("; ");
+            attempts.Append(value);
         }
 
         private static bool Contains(List<IPAddress> addresses, IPAddress candidate)

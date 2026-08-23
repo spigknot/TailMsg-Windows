@@ -1,0 +1,5 @@
+{
+  "endpoint": "https://0c3bebed8def676eb7d77371a7b0330e.r2.cloudflarestorage.com",
+  "access_key_id": "<TAILMSG_ACCESS_KEY_ID>",
+  "secret_access_key": "<TAILMSG_SECRET_ACCESS_KEY>"
+}

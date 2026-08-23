@@ -41,15 +41,15 @@ namespace TailMsg
                     EnableTls12();
                     try
                     {
-                        UpdateManifest driveManifest = LoadDriveManifest();
-                        if (IsNewerThanCurrent(driveManifest))
+                        UpdateManifest r2Manifest = LoadR2Manifest();
+                        if (IsNewerThanCurrent(r2Manifest))
                         {
-                            selected = driveManifest;
+                            selected = r2Manifest;
                         }
                     }
                     catch (Exception exception)
                     {
-                        failures.Add("Drive: " + exception.Message);
+                        failures.Add("R2: " + exception.Message);
                     }
 
                     try
@@ -251,18 +251,18 @@ namespace TailMsg
             return manifest;
         }
 
-        private static UpdateManifest LoadDriveManifest()
+        private static UpdateManifest LoadR2Manifest()
         {
             string json;
             using (WebClient client = CreateWebClient())
             {
-                json = client.DownloadString(BuildDownloadUrl(
-                    UpdateConfig.ManifestFileId));
+                json = client.DownloadString(BuildR2Url(
+                    UpdateConfig.ManifestFileName));
             }
 
             UpdateManifest manifest = ParseManifest(json);
-            manifest.DownloadUrl = BuildDownloadUrl(manifest.FileId);
-            manifest.Source = "Drive";
+            manifest.DownloadUrl = BuildR2Url(manifest.FileId);
+            manifest.Source = "R2";
             ValidateManifest(manifest);
             return manifest;
         }
@@ -410,11 +410,10 @@ namespace TailMsg
                 "/releases/latest";
         }
 
-        private static string BuildDownloadUrl(string fileId)
+        private static string BuildR2Url(string fileName)
         {
-            return "https://drive.usercontent.google.com/download?id=" +
-                Uri.EscapeDataString(fileId) +
-                "&export=download&confirm=t";
+            return UpdateConfig.R2PublicBase + "/" +
+                Uri.EscapeDataString(fileName);
         }
 
         private static string GetDownloadUrl(UpdateManifest manifest)
@@ -426,14 +425,14 @@ namespace TailMsg
                     uri.Scheme != Uri.UriSchemeHttps ||
                     (uri.Host != "github.com" &&
                      uri.Host != "objects.githubusercontent.com" &&
-                     uri.Host != "drive.usercontent.google.com"))
+                     !uri.Host.EndsWith(".r2.dev")))
                 {
                     throw new InvalidDataException(
                         "A origem da atualização não é confiável.");
                 }
                 return manifest.DownloadUrl;
             }
-            return BuildDownloadUrl(manifest.FileId);
+            return BuildR2Url(manifest.FileId);
         }
 
         private static void EnableTls12()

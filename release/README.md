@@ -1,86 +1,44 @@
 # Publicação de atualizações do TailMsg
 
-Os ZIPs são mantidos na pasta do Google Drive:
+> **FONTE DA VERDADE: [`UPDATE.md`](../UPDATE.md)** (raiz do repositório) — procedimento
+> completo, comandos literais, verificações, regras e pitfalls. Leia-o antes de
+> publicar qualquer versão.
 
-```text
-https://drive.google.com/drive/folders/1_eHfJVvb9a1F3D3Fd54u_ZRSfOA5aCK4
-```
+## Resumo
 
-O arquivo `tailmsg-update.json` possui ID permanente:
-
-```text
-1XNoZq_vnVP0FGfYKnmF1cv4Rn1HcBKn4
-```
+- Os ZIPs são publicados no **Cloudflare R2** (bucket `tailmsg`,
+  `https://pub-ce3b9c72c0fa4a2eb8c44a21c6ece860.r2.dev`) — canal principal desde
+  `20260823_001`.
+- O manifesto permanente e assinado `tailmsg-update.json` aponta para a versão
+  mais recente (atualizado no lugar a cada versão).
+- **GitHub Releases** (`spigknot/TailMsg-Windows`) é o segundo canal: ZIP full +
+  `tailmsg-update.json` assinado + instalador offline `setup_tailmsg_<v>.exe`.
+- O app consulta os dois canais a cada abertura e usa a versão mais nova,
+  sempre validando assinatura, tamanho e SHA-256 antes de instalar.
+- **Google Drive: APOSENTADO** desde `20260823_001`. Não publicar mais lá.
 
 ## Numeração
 
-Liste os ZIPs existentes no Drive e escolha o próximo número do dia:
-
-```text
-20260730_001.zip
-20260730_002.zip
-20260731_001.zip
+```
+20260823_001.zip
+20260823_002.zip
 ```
 
 Nunca apague ou substitua um ZIP publicado. O manifesto é o único arquivo
 atualizado no lugar.
 
-## Fluxo de publicação
+## Fluxo de publicação (resumo)
 
-1. Atualize `UpdateConfig.CurrentVersion` para a nova versão.
-2. Crie o pacote com compactação rápida:
-
-   ```powershell
-   .\release\package-release.ps1 -Version 20260730_002
-   ```
-
-3. Envie o ZIP criado em `release\packages` à pasta do Drive, preservando o
-   nome, e anote o ID retornado.
-4. Gere o manifesto assinado:
-
-   ```powershell
-   .\release\sign-manifest.ps1 `
-       -Version 20260730_002 `
-       -FileId ID_DO_ZIP_NO_DRIVE
-   ```
-
-5. Atualize no Drive o arquivo de ID
-   `1XNoZq_vnVP0FGfYKnmF1cv4Rn1HcBKn4` com o novo
-   `release\tailmsg-update.json`.
-6. Baixe o manifesto e o ZIP pelos URLs públicos, confira tamanho, SHA-256 e
-   assinatura antes de anunciar a versão.
-
-## GitHub Releases
-
-Cada versão também recebe um pacote full em uma release do GitHub. A release
-leva o ZIP e um `tailmsg-update.json` assinado; o updater compara esse canal
-com o Drive e usa a versão mais nova, sempre validando assinatura, tamanho e
-SHA-256 antes de instalar.
-
-Depois de criar o ZIP, publique com:
-
-```powershell
-.\release\publish-github-release.ps1 -Version 20260818_004
-```
-
-O repositório configurado atualmente é `spigknot/TailMsg-Windows`.
-O ZIP é sempre full; não há publicação de diff ou incremental no TailMsg.
-
-O mesmo fluxo também gera `release\generated\<versão>\setup_tailmsg_<versão>.exe`,
-um instalador offline do Inno Setup com o pacote completo embutido. Ele instala
-por padrão em `C:\Program Files\TailMsg`, cria atalhos do TailMsg e do updater
-na área de trabalho e no menu iniciar, configura o firewall e inclui o
-desinstalador nativo. O instalador é publicado como asset adicional da release
-do GitHub.
-
-O `TailMsgUpdater.exe` incluído no ZIP também funciona de forma independente:
-aberto sem parâmetros, ele consulta a release full mais recente, permite
-escolher a pasta de instalação e instala o pacote usando um helper temporário,
-o que permite substituir o próprio updater com segurança.
+1. Atualize `UpdateConfig.CurrentVersion` (raiz) para a nova versão.
+2. `.\release\package-release.ps1 -Version YYYYMMDD_NNN` (build + ZIP + instalador).
+3. `.\release\sign-manifest.ps1 -Version YYYYMMDD_NNN -FileId YYYYMMDD_NNN.zip` (manifesto assinado).
+4. Suba o ZIP e o `tailmsg-update.json` para o R2 (boto3 — ver UPDATE.md seção 5).
+5. `.\release\publish-github-release.ps1 -Version YYYYMMDD_NNN` (release GitHub).
+6. Verificações obrigatórias (R2 público + SHA do asset do GitHub) — UPDATE.md seções 5 e 6.
 
 ## Chaves
 
 - `update-public-key.xml` é incorporada ao aplicativo.
-- `update-private-key.xml` assina os manifestos e nunca entra no ZIP.
+- `update-private-key.xml` assina os manifestos e nunca entra no ZIP nem no git.
 - Se a chave privada for perdida, versões já instaladas não aceitarão
   manifestos assinados por outra chave.

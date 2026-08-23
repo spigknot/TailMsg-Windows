@@ -62,4 +62,4 @@ $json = @"
 
 Write-Host "Manifesto assinado: $manifestPath"
 Write-Host "Versão: $Version"
-Write-Host "Arquivo no Drive: $FileId"
+Write-Host "Arquivo no R2: $FileId"

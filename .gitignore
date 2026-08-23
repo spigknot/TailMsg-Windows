@@ -11,3 +11,5 @@ build-validation-manual/
 linux/
 *.exe
 *.log
+build/
+TailMsg-Windows-full-*.zip

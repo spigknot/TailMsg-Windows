@@ -1026,7 +1026,7 @@ namespace TailMsg
                 },
                 delegate(string error)
                 {
-                    // Falhas de internet ou do Drive não interrompem o uso do
+                    // Falhas de internet ou do R2/GitHub não interrompem o uso do
                     // mensageiro. Uma nova consulta ocorrerá na próxima abertura.
                 },
                 delegate(bool found)

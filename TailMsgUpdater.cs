@@ -8,6 +8,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -18,11 +19,12 @@ namespace TailMsgUpdater
 {
     internal static class Program
     {
-        private const string CurrentVersion = "20260818_005";
+        private const string CurrentVersion = "20260823_002";
         private const string GitHubRepository = "spigknot/TailMsg-Windows";
         private const string LatestReleaseUrl =
-            "https://api.github.com/repos/spigknot/TailMsg-Windows/releases/latest";
+            "https://api.github.com/repos/" + GitHubRepository + "/releases/latest";
         private const string GitHubUserAgent = "TailMsgUpdater/" + CurrentVersion;
+        private const string PublicKeyResource = "TailMsg.UpdatePublicKey";
         private const int MaximumReleaseResponseBytes = 2 * 1024 * 1024;
         private const int MaximumZipEntries = 1000;
         private const long MaximumZipBytes = 512L * 1024L * 1024L;
@@ -30,10 +32,24 @@ namespace TailMsgUpdater
         private sealed class FullRelease
         {
             public string Version;
-            public string ZipName;
             public string DownloadUrl;
             public string Sha256;
             public long Size;
+        }
+
+        private sealed class TimeoutWebClient : WebClient
+        {
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                HttpWebRequest request =
+                    (HttpWebRequest)base.GetWebRequest(address);
+                if (request != null)
+                {
+                    request.Timeout = 10000;
+                    request.ReadWriteTimeout = 10000;
+                }
+                return request;
+            }
         }
 
         [STAThread]
@@ -118,9 +134,19 @@ namespace TailMsgUpdater
 
             string expectedName = version + ".zip";
             List<string> assets = ExtractJsonObjects(json, "assets");
+            string manifestUrl = "";
+            FullRelease release = null;
             foreach (string asset in assets)
             {
                 string name = ReadJsonString(asset, "name");
+                if (String.Equals(
+                    name,
+                    "tailmsg-update.json",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    manifestUrl = ReadJsonString(asset, "browser_download_url");
+                    continue;
+                }
                 if (!String.Equals(
                     name,
                     expectedName,
@@ -143,28 +169,123 @@ namespace TailMsgUpdater
                     throw new InvalidDataException(
                         "O GitHub não forneceu tamanho e SHA-256 válidos para o pacote full.");
                 }
-                if (!Uri.TryCreate(url, UriKind.Absolute, out parsed) ||
-                    parsed.Scheme != Uri.UriSchemeHttps ||
-                    (parsed.Host != "github.com" &&
-                     parsed.Host != "objects.githubusercontent.com" &&
-                     parsed.Host != "release-assets.githubusercontent.com"))
+                if (!IsTrustedGitHubUrl(url, out parsed))
                 {
                     throw new InvalidDataException(
                         "A release completa contém uma URL de download não confiável.");
                 }
 
-                return new FullRelease
+                release = new FullRelease
                 {
                     Version = version,
-                    ZipName = name,
                     DownloadUrl = url,
                     Sha256 = digest.ToLowerInvariant(),
                     Size = size
                 };
             }
 
-            throw new FileNotFoundException(
-                "A release mais recente não possui o pacote full " + expectedName + ".");
+            if (release == null)
+            {
+                throw new FileNotFoundException(
+                    "A release mais recente não possui o pacote full " + expectedName + ".");
+            }
+            Uri manifestUri;
+            if (!IsTrustedGitHubUrl(manifestUrl, out manifestUri))
+            {
+                throw new InvalidDataException(
+                    "A release completa não contém uma URL de manifesto confiável.");
+            }
+
+            ValidateReleaseManifest(
+                DownloadText(manifestUrl),
+                version,
+                expectedName,
+                release);
+            return release;
+        }
+
+        private static bool IsTrustedGitHubUrl(string value, out Uri uri)
+        {
+            if (!Uri.TryCreate(value, UriKind.Absolute, out uri) ||
+                uri.Scheme != Uri.UriSchemeHttps)
+            {
+                return false;
+            }
+            return uri.Host == "github.com" ||
+                uri.Host == "objects.githubusercontent.com" ||
+                uri.Host == "release-assets.githubusercontent.com";
+        }
+
+        private static void ValidateReleaseManifest(
+            string json,
+            string expectedVersion,
+            string expectedFileId,
+            FullRelease release)
+        {
+            string version = ReadJsonString(json, "version");
+            string fileId = ReadJsonString(json, "fileId");
+            string sha256 = ReadJsonString(json, "sha256");
+            string signatureText = ReadJsonString(json, "signature");
+            long size = ReadJsonLong(json, "size");
+            if (!String.Equals(version, expectedVersion, StringComparison.Ordinal) ||
+                !String.Equals(fileId, expectedFileId, StringComparison.OrdinalIgnoreCase) ||
+                !Regex.IsMatch(sha256 ?? "", @"^[A-Fa-f0-9]{64}$") ||
+                size <= 0 || String.IsNullOrEmpty(signatureText))
+            {
+                throw new InvalidDataException(
+                    "O manifesto assinado da release é inválido.");
+            }
+            if (!String.Equals(sha256, release.Sha256, StringComparison.OrdinalIgnoreCase) ||
+                size != release.Size)
+            {
+                throw new InvalidDataException(
+                    "O manifesto não corresponde ao pacote full da release.");
+            }
+
+            byte[] signature;
+            try
+            {
+                signature = Convert.FromBase64String(signatureText);
+            }
+            catch
+            {
+                throw new InvalidDataException(
+                    "A assinatura do manifesto é inválida.");
+            }
+
+            string payload = version + "\n" + fileId + "\n" +
+                sha256.ToUpperInvariant() + "\n" + size;
+            using (RSACryptoServiceProvider rsa =
+                new RSACryptoServiceProvider())
+            {
+                rsa.PersistKeyInCsp = false;
+                rsa.FromXmlString(ReadPublicKey());
+                if (!rsa.VerifyData(
+                    Encoding.UTF8.GetBytes(payload),
+                    CryptoConfig.MapNameToOID("SHA256"),
+                    signature))
+                {
+                    throw new CryptographicException(
+                        "O manifesto da release não foi assinado pelo responsável do TailMsg.");
+                }
+            }
+        }
+
+        private static string ReadPublicKey()
+        {
+            Assembly assembly = Assembly.GetExecutingAssembly();
+            using (Stream stream = assembly.GetManifestResourceStream(PublicKeyResource))
+            {
+                if (stream == null)
+                {
+                    throw new InvalidOperationException(
+                        "A chave pública de atualização não está incorporada no atualizador.");
+                }
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+                {
+                    return reader.ReadToEnd();
+                }
+            }
         }
 
         private static string DownloadText(string url)
@@ -175,6 +296,8 @@ namespace TailMsgUpdater
             request.UserAgent = GitHubUserAgent;
             request.Accept = "application/vnd.github+json";
             request.Headers["X-GitHub-Api-Version"] = "2022-11-28";
+            request.Timeout = 10000;
+            request.ReadWriteTimeout = 10000;
             using (WebResponse response = request.GetResponse())
             using (Stream input = response.GetResponseStream())
             using (MemoryStream output = new MemoryStream())
@@ -295,7 +418,7 @@ namespace TailMsgUpdater
             EnableTls12();
             string parent = Path.GetDirectoryName(zipPath);
             if (!Directory.Exists(parent)) Directory.CreateDirectory(parent);
-            using (WebClient client = new WebClient())
+            using (WebClient client = new TimeoutWebClient())
             {
                 client.Headers[HttpRequestHeader.UserAgent] = GitHubUserAgent;
                 client.Headers[HttpRequestHeader.Accept] =
@@ -626,17 +749,17 @@ namespace TailMsgUpdater
             string extractionDirectory = Path.Combine(
                 Path.GetTempPath(),
                 "TailMsgUpdate-" + Guid.NewGuid().ToString("N"));
+            string backupDirectory = Path.Combine(
+                Path.GetTempPath(),
+                "TailMsgBackup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(extractionDirectory);
-
-            string backupPath = Path.Combine(
-                targetDirectory,
-                "TailMsg.exe.bak");
-            string currentApplication = Path.Combine(
-                targetDirectory,
-                "TailMsg.exe");
+            List<string> copiedDestinations = new List<string>();
+            Dictionary<string, string> backups =
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
+                ValidatePackageLayout(zipPath, null);
                 ExtractSafely(zipPath, extractionDirectory);
                 string newApplication = Path.Combine(
                     extractionDirectory,
@@ -652,10 +775,6 @@ namespace TailMsgUpdater
                 }
 
                 Directory.CreateDirectory(targetDirectory);
-                if (File.Exists(currentApplication))
-                {
-                    CopyWithRetry(currentApplication, backupPath, true);
-                }
 
                 foreach (string sourceFile in Directory.GetFiles(
                     extractionDirectory,
@@ -685,16 +804,42 @@ namespace TailMsgUpdater
                     {
                         Directory.CreateDirectory(parent);
                     }
+
+                    if (!backups.ContainsKey(destination) &&
+                        File.Exists(destination))
+                    {
+                        string backupFile = Path.Combine(
+                            backupDirectory,
+                            relative);
+                        string backupParent = Path.GetDirectoryName(backupFile);
+                        if (!Directory.Exists(backupParent))
+                        {
+                            Directory.CreateDirectory(backupParent);
+                        }
+                        CopyWithRetry(destination, backupFile, true);
+                        backups.Add(destination, backupFile);
+                    }
+
+                    copiedDestinations.Add(destination);
                     CopyWithRetry(sourceFile, destination, true);
                 }
             }
             catch
             {
-                if (File.Exists(backupPath))
+                for (int index = copiedDestinations.Count - 1; index >= 0; index--)
                 {
                     try
                     {
-                        CopyWithRetry(backupPath, currentApplication, true);
+                        if (File.Exists(copiedDestinations[index]))
+                            File.Delete(copiedDestinations[index]);
+                    }
+                    catch { }
+                }
+                foreach (KeyValuePair<string, string> backup in backups)
+                {
+                    try
+                    {
+                        CopyWithRetry(backup.Value, backup.Key, true);
                     }
                     catch { }
                 }
@@ -705,6 +850,11 @@ namespace TailMsgUpdater
                 try
                 {
                     Directory.Delete(extractionDirectory, true);
+                }
+                catch { }
+                try
+                {
+                    Directory.Delete(backupDirectory, true);
                 }
                 catch { }
             }

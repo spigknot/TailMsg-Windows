@@ -243,8 +243,13 @@ namespace TailMsg
 
             try
             {
+                string logDirectory = Path.Combine(
+                    Environment.GetFolderPath(
+                        Environment.SpecialFolder.LocalApplicationData),
+                    "TailMsg");
+                Directory.CreateDirectory(logDirectory);
                 string logPath = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
+                    logDirectory,
                     "tailmsg-diagnose.txt");
                 File.WriteAllText(logPath, reportText, Encoding.UTF8);
                 if (consoleAvailable)
@@ -1111,7 +1116,7 @@ namespace TailMsg
         {
             if (InvokeRequired)
             {
-                BeginInvoke((MethodInvoker)delegate { ShowFromTray(); });
+                TryBeginInvoke(delegate { ShowFromTray(); });
                 return;
             }
 
@@ -1164,6 +1169,21 @@ namespace TailMsg
             }
         }
 
+        private bool TryBeginInvoke(MethodInvoker action)
+        {
+            try
+            {
+                if (IsDisposed || Disposing || !IsHandleCreated)
+                    return false;
+                BeginInvoke(action);
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
         private void CheckForUpdates(bool manual)
         {
             ToolStripMenuItem checkItem = null;
@@ -1203,7 +1223,7 @@ namespace TailMsg
                     // Falhas de internet ou do R2/GitHub não interrompem o uso do
                     // mensageiro. Uma nova consulta ocorrerá na próxima abertura.
                 },
-                delegate(bool found)
+                delegate(bool found, string checkError)
                 {
                     if (!manual || IsDisposed || checkItem == null) return;
                     try
@@ -1215,12 +1235,17 @@ namespace TailMsg
                             checkItem.Enabled = true;
                             if (!found)
                             {
+                                string message = String.IsNullOrEmpty(checkError)
+                                    ? "Nenhuma atualização disponível. O TailMsg já está na versão mais recente."
+                                    : "Não foi possível verificar atualizações.\r\n\r\n" + checkError;
                                 MessageBox.Show(
                                     this,
-                                    "Nenhuma atualização disponível. O TailMsg já está na versão mais recente.",
+                                    message,
                                     "TailMsg - atualizações",
                                     MessageBoxButtons.OK,
-                                    MessageBoxIcon.Information);
+                                    String.IsNullOrEmpty(checkError)
+                                        ? MessageBoxIcon.Information
+                                        : MessageBoxIcon.Warning);
                             }
                         });
                     }
@@ -1315,7 +1340,7 @@ namespace TailMsg
                 try
                 {
                     List<PeerInfo> computers = networkService.Discover(2200);
-                    BeginInvoke((MethodInvoker)delegate
+                    TryBeginInvoke(delegate
                     {
                         latestPeers = computers;
                         List<PeerInfo> visibleComputers = GetFilteredPeers();
@@ -1328,7 +1353,7 @@ namespace TailMsg
                 }
                 catch (Exception exception)
                 {
-                    BeginInvoke((MethodInvoker)delegate
+                    TryBeginInvoke(delegate
                     {
                         computerList.Controls.Clear();
                         countLabel.Text = "";
@@ -1339,7 +1364,7 @@ namespace TailMsg
                 }
                 finally
                 {
-                    BeginInvoke((MethodInvoker)delegate
+                    TryBeginInvoke(delegate
                     {
                         isRefreshing = false;
                         UpdateActionStates();
@@ -1505,7 +1530,7 @@ namespace TailMsg
             ThreadPool.QueueUserWorkItem(delegate
             {
                 MessageSendResult result = MessageSender.Send(computer, localComputerName, message);
-                BeginInvoke((MethodInvoker)delegate
+                TryBeginInvoke(delegate
                 {
                     isSending = false;
                     UpdateActionStates();
@@ -1534,7 +1559,7 @@ namespace TailMsg
                 return;
             }
 
-            BeginInvoke((MethodInvoker)delegate
+            TryBeginInvoke(delegate
             {
                 string line = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): " + e.Message;
@@ -2038,6 +2063,8 @@ namespace TailMsg
         public const int TcpPort = 38257;
         public const int DiscoveryPort = 38258;
         public const string DiscoveryMulticast = "239.255.42.99";
+        private const int MaximumMessageLineBytes =
+            TailMsgProtocol.MaxGuiMessageCharacters * 4 + 8192;
         private readonly string localName;
         private readonly object peersLock = new object();
         private readonly Dictionary<string, PeerInfo> peers = new Dictionary<string, PeerInfo>(StringComparer.OrdinalIgnoreCase);
@@ -2199,10 +2226,11 @@ namespace TailMsg
                 client.SendTimeout = 8000;
 
                 using (NetworkStream stream = client.GetStream())
-                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
                 using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
                 {
-                    string line = reader.ReadLine();
+                    string line = ReadLineLimited(
+                        stream,
+                        MaximumMessageLineBytes);
                     if (String.IsNullOrEmpty(line)) return;
 
                     string[] pieces = line.Split('|');
@@ -2236,6 +2264,35 @@ namespace TailMsg
             finally
             {
                 try { client.Close(); } catch { }
+            }
+        }
+
+        internal static string ReadLineLimited(Stream stream, int maximumBytes)
+        {
+            using (MemoryStream buffer = new MemoryStream())
+            {
+                while (true)
+                {
+                    int value = stream.ReadByte();
+                    if (value < 0)
+                    {
+                        if (buffer.Length == 0) return null;
+                        break;
+                    }
+                    if (value == '\n') break;
+                    if (buffer.Length >= maximumBytes)
+                    {
+                        throw new InvalidDataException(
+                            "A mensagem recebida excede o limite permitido.");
+                    }
+                    buffer.WriteByte((byte)value);
+                }
+
+                byte[] bytes = buffer.ToArray();
+                int length = bytes.Length;
+                if (length > 0 && bytes[length - 1] == '\r')
+                    length--;
+                return new UTF8Encoding(false, true).GetString(bytes, 0, length);
             }
         }
 
@@ -2284,26 +2341,10 @@ namespace TailMsg
             byte[] data = Encoding.UTF8.GetBytes(request);
             HashSet<string> sent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (NetworkEndpoint endpoint in NetworkDiscovery.GetEndpoints())
-            {
-                if (!String.IsNullOrEmpty(endpoint.BroadcastAddress))
-                {
-                    SendPacket(data, IPAddress.Parse(endpoint.BroadcastAddress), sent);
-                }
-            }
-
-            foreach (IPAddress address in TailscaleDiscovery.FindPeerAddresses())
+            foreach (IPAddress address in NetworkDiscovery.GetDiscoveryTargets())
             {
                 SendPacket(data, address, sent);
             }
-
-            // Broadcast limitado: alcança a rede local mesmo quando a
-            // enumeração de interfaces não funciona (Wine/Mono).
-            SendPacket(data, IPAddress.Parse("255.255.255.255"), sent);
-
-            // Alguns ambientes Tailscale permitem multicast na interface; é
-            // barato tentar e ajuda quando o executável tailscale.exe não está no PATH.
-            SendPacket(data, IPAddress.Parse(DiscoveryMulticast), sent);
         }
 
         private void SendPacket(byte[] data, IPAddress address, HashSet<string> sent)
@@ -2634,6 +2675,15 @@ namespace TailMsg
             get { return lastAttemptSummary; }
         }
 
+        private static int RemainingMilliseconds(
+            DateTime deadlineUtc,
+            int maximumMilliseconds)
+        {
+            double remaining = (deadlineUtc - DateTime.UtcNow).TotalMilliseconds;
+            if (remaining < 100) return 0;
+            return Math.Min(maximumMilliseconds, (int)remaining);
+        }
+
         public static List<IPAddress> FindPeerAddresses()
         {
             List<IPAddress> addresses = new List<IPAddress>();
@@ -2661,8 +2711,11 @@ namespace TailMsg
                 windowsCommands.Add(Path.Combine(programFiles64, "Tailscale\\tailscale.exe"));
             }
 
+            DateTime nativeDeadline = DateTime.UtcNow.AddSeconds(5);
             foreach (string cmd in windowsCommands)
             {
+                int timeoutMilliseconds = RemainingMilliseconds(nativeDeadline, 3000);
+                if (timeoutMilliseconds <= 0) break;
                 try
                 {
                     ProcessStartInfo info = new ProcessStartInfo();
@@ -2673,14 +2726,34 @@ namespace TailMsg
                     info.RedirectStandardOutput = true;
                     info.RedirectStandardError = true;
 
-                    using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(info))
+                    using (Process process = Process.Start(info))
                     {
-                        string output = process.StandardOutput.ReadToEnd();
-                        string stderr = process.StandardError.ReadToEnd();
-                        process.WaitForExit(3000);
-                        output += stderr;
+                        StringBuilder output = new StringBuilder();
+                        StringBuilder errors = new StringBuilder();
+                        process.OutputDataReceived += delegate(
+                            object sender,
+                            DataReceivedEventArgs eventArgs)
+                        {
+                            if (eventArgs.Data != null)
+                                output.AppendLine(eventArgs.Data);
+                        };
+                        process.ErrorDataReceived += delegate(
+                            object sender,
+                            DataReceivedEventArgs eventArgs)
+                        {
+                            if (eventArgs.Data != null)
+                                errors.AppendLine(eventArgs.Data);
+                        };
+                        process.BeginOutputReadLine();
+                        process.BeginErrorReadLine();
+                        if (!process.WaitForExit(timeoutMilliseconds))
+                        {
+                            try { process.Kill(); } catch { }
+                        }
+                        process.WaitForExit(1000);
 
-                        foreach (Match match in AddressPattern.Matches(output))
+                        string text = output.ToString() + errors.ToString();
+                        foreach (Match match in AddressPattern.Matches(text))
                         {
                             IPAddress address;
                             if (IPAddress.TryParse(match.Value, out address) && !Contains(addresses, address))
@@ -2728,13 +2801,36 @@ namespace TailMsg
                 shells.Add("/usr/bin/bash");
                 shells.Add("/bin/bash");
 
+                DateTime wineDeadline = DateTime.UtcNow.AddSeconds(6);
+
+                // Fallback opcional: algumas instalações expõem a LocalAPI TCP
+                // apenas para clientes locais. Ela é consultada primeiro porque
+                // não exige iniciar um shell Unix através do Wine.
+                string apiSource;
+                if (TryReadWineLocalApi(addresses, out apiSource))
+                {
+                    lastSuccessSource = apiSource;
+                    lastAttemptSummary = apiSource;
+                    wineCachedAddresses = new List<IPAddress>(addresses);
+                    wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                    return new List<IPAddress>(addresses);
+                }
+
                 foreach (string shell in UniqueStrings(shells))
                 {
                     foreach (string binary in UniqueStrings(binaries))
                     {
+                        int timeoutMilliseconds = RemainingMilliseconds(
+                            wineDeadline,
+                            1200);
+                        if (timeoutMilliseconds <= 0) break;
                         string output;
                         string command = "exec " + ShellQuote(binary) + " status --json";
-                        if (TryRunWineUnixShell(shell, command, out output))
+                        if (TryRunWineUnixShell(
+                            shell,
+                            command,
+                            timeoutMilliseconds,
+                            out output))
                         {
                             int found = AddAddressesFromOutput(output, addresses);
                             if (found > 0)
@@ -2756,10 +2852,15 @@ namespace TailMsg
 
                     // Permite que o PATH do host seja usado quando o Tailscale
                     // estiver instalado fora dos caminhos usuais.
+                    int pathTimeoutMilliseconds = RemainingMilliseconds(
+                        wineDeadline,
+                        1200);
+                    if (pathTimeoutMilliseconds <= 0) break;
                     string pathOutput;
                     if (TryRunWineUnixShell(
                         shell,
                         "command -v tailscale >/dev/null 2>&1 && exec tailscale status --json",
+                        pathTimeoutMilliseconds,
                         out pathOutput))
                     {
                         int found = AddAddressesFromOutput(pathOutput, addresses);
@@ -2779,20 +2880,6 @@ namespace TailMsg
                     }
                 }
 
-                // Fallback opcional: algumas instalações expõem a LocalAPI TCP
-                // apenas para clientes locais. A URL pode ser substituída por
-                // TAILMSG_TAILSCALE_API; nenhum comportamento Windows passa por
-                // este bloco.
-                string apiSource;
-                if (TryReadWineLocalApi(addresses, out apiSource))
-                {
-                    lastSuccessSource = apiSource;
-                    lastAttemptSummary = apiSource;
-                    wineCachedAddresses = new List<IPAddress>(addresses);
-                    wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
-                    return new List<IPAddress>(addresses);
-                }
-
                 lastAttemptSummary = attempts.Length == 0
                     ? "Wine: nenhuma estratégia executada"
                     : "Wine: " + attempts.ToString();
@@ -2805,6 +2892,7 @@ namespace TailMsg
         private static bool TryRunWineUnixShell(
             string unixShell,
             string shellCommand,
+            int timeoutMilliseconds,
             out string output)
         {
             output = "";
@@ -2818,6 +2906,7 @@ namespace TailMsg
                 " > " + ShellQuote(unixOutputPath) +
                 " 2>&1; printf '\\n" + marker + "\\n' >> " +
                 ShellQuote(unixOutputPath);
+            bool completed = false;
 
             try
             {
@@ -2833,9 +2922,9 @@ namespace TailMsg
 
                 using (Process process = Process.Start(info))
                 {
-                    DateTime deadline = DateTime.UtcNow.AddMilliseconds(5000);
+                    DateTime deadline = DateTime.UtcNow.AddMilliseconds(
+                        Math.Max(100, timeoutMilliseconds));
                     string content = "";
-                    bool completed = false;
                     while (DateTime.UtcNow < deadline)
                     {
                         content = ReadWineOutput(wineOutputPath, unixOutputPath);
@@ -2876,7 +2965,7 @@ namespace TailMsg
                     }
                 }
 
-                return output.Length > 0;
+                return completed;
             }
             catch (Exception exception)
             {
@@ -3078,12 +3167,11 @@ namespace TailMsg
                 client.ReceiveTimeout = 6000;
 
                 using (NetworkStream stream = client.GetStream())
-                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
                 using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
                 {
                     writer.WriteLine(TailMsgProtocol.BuildMessage(senderName, message));
                     writer.Flush();
-                    string response = reader.ReadLine();
+                    string response = NetworkService.ReadLineLimited(stream, 1024);
                     if (response == TailMsgProtocol.Acknowledgement + "|1|OK")
                     {
                         return MessageSendResult.Succeeded();

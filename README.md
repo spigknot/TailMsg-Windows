@@ -1,8 +1,8 @@
 # TailMsg
 
-O repositório contém o aplicativo original para Windows e uma versão Linux
-compatível, em [`linux`](linux/README.md). As duas versões usam o mesmo
-protocolo, as mesmas portas e trocam mensagens entre si normalmente.
+Este repositório contém o aplicativo Windows. Existe também uma implementação
+Linux compatível, mantida separadamente, que usa o mesmo protocolo e as mesmas
+portas.
 
 Mensageiro Windows próprio para computadores da delegacia. O TailMsg não usa
 `msg.exe`, RPC, SMB ou permissões de sessão do Windows.
@@ -71,8 +71,10 @@ TailMsg e para o updater.
 ## Atualizações
 
 Os pacotes seguem o formato `AAAAMMDD_NNN.zip`, por exemplo
-`20260730_001.zip`. Todas as versões permanecem armazenadas no Google Drive; um
-manifesto permanente e assinado aponta somente para a versão mais recente.
+`20260730_001.zip`. O canal principal é o Cloudflare R2, com as releases do
+GitHub como alternativa. O aplicativo consulta os dois canais e escolhe a
+versão mais nova com manifesto assinado. O Google Drive conserva apenas
+versões históricas da fase anterior.
 
 O aplicativo ignora manifestos sem assinatura válida e confere o tamanho e o
 SHA-256 do ZIP antes de fechar para instalar a atualização.
@@ -113,5 +115,5 @@ arquiteturas:
 .\build.ps1 -Architecture AnyCPU
 ```
 
-É necessário o compilador do .NET Framework 4.0 ou posterior. Em Windows 7,
-o .NET Framework 4.x precisa estar instalado.
+É necessário o compilador e o runtime do .NET Framework 4.5 ou posterior. Em
+Windows 7, o .NET Framework 4.5 precisa estar instalado.

@@ -19,7 +19,6 @@ namespace TailMsg
         public long Size;
         public string Signature;
         public string DownloadUrl;
-        public string Source;
     }
 
     internal static class TailMsgUpdateClient
@@ -29,13 +28,14 @@ namespace TailMsg
         public static void CheckAsync(
             Action<UpdateManifest> updateAvailable,
             Action<string> failed,
-            Action<bool> completed = null)
+            Action<bool, string> completed = null)
         {
             ThreadPool.QueueUserWorkItem(delegate
             {
                 bool found = false;
                 UpdateManifest selected = null;
                 List<string> failures = new List<string>();
+                string completionError = "";
                 try
                 {
                     EnableTls12();
@@ -81,11 +81,18 @@ namespace TailMsg
                 }
                 catch (Exception exception)
                 {
+                    completionError = exception.Message;
                     if (failed != null) failed(exception.Message);
                 }
                 finally
                 {
-                    if (completed != null) completed(found);
+                    if (completionError.Length == 0 && failures.Count > 0)
+                    {
+                        completionError = String.Join(
+                            " | ",
+                            failures.ToArray());
+                    }
+                    if (completed != null) completed(found, completionError);
                 }
             });
         }
@@ -262,7 +269,6 @@ namespace TailMsg
 
             UpdateManifest manifest = ParseManifest(json);
             manifest.DownloadUrl = BuildR2Url(manifest.FileId);
-            manifest.Source = "R2";
             ValidateManifest(manifest);
             return manifest;
         }
@@ -320,7 +326,6 @@ namespace TailMsg
             }
 
             manifest.DownloadUrl = packageUrl;
-            manifest.Source = "GitHub";
             ValidateManifest(manifest);
             return manifest;
         }
@@ -394,9 +399,24 @@ namespace TailMsg
             }
         }
 
+        private sealed class TimeoutWebClient : WebClient
+        {
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                HttpWebRequest request =
+                    (HttpWebRequest)base.GetWebRequest(address);
+                if (request != null)
+                {
+                    request.Timeout = 8000;
+                    request.ReadWriteTimeout = 8000;
+                }
+                return request;
+            }
+        }
+
         private static WebClient CreateWebClient()
         {
-            WebClient client = new WebClient();
+            WebClient client = new TimeoutWebClient();
             client.Encoding = Encoding.UTF8;
             client.Headers[HttpRequestHeader.UserAgent] =
                 "TailMsg/" + UpdateConfig.CurrentVersion;

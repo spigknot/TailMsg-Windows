@@ -13,8 +13,15 @@ if (-not $isAdministrator) {
     exit
 }
 
-$sourcePath = Join-Path (Split-Path -Parent $scriptPath) "dist\TailMsg.exe"
-$updaterSourcePath = Join-Path (Split-Path -Parent $scriptPath) "dist\TailMsgUpdater.exe"
+$scriptDirectory = Split-Path -Parent $scriptPath
+$sourcePath = Join-Path $scriptDirectory "TailMsg.exe"
+$updaterSourcePath = Join-Path $scriptDirectory "TailMsgUpdater.exe"
+if (-not (Test-Path -LiteralPath $sourcePath)) {
+    $sourcePath = Join-Path $scriptDirectory "dist\TailMsg.exe"
+}
+if (-not (Test-Path -LiteralPath $updaterSourcePath)) {
+    $updaterSourcePath = Join-Path $scriptDirectory "dist\TailMsgUpdater.exe"
+}
 if (-not (Test-Path -LiteralPath $sourcePath)) {
     throw "Execute .\build.ps1 antes da instalação."
 }
@@ -31,7 +38,22 @@ if (-not (Test-Path -LiteralPath $installDirectory)) {
 }
 
 Get-Process -Name "TailMsg" -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
+    ForEach-Object {
+        try {
+            if ([String]::Equals(
+                    $_.MainModule.FileName,
+                    $installedPath,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                $_.CloseMainWindow() | Out-Null
+                if (-not $_.WaitForExit(5000)) {
+                    $_.Kill()
+                    $_.WaitForExit(5000)
+                }
+            }
+        } catch {
+            # O processo pode encerrar durante a reinstalação.
+        }
+    }
 
 Copy-Item -LiteralPath $sourcePath -Destination $installedPath -Force
 Copy-Item -LiteralPath $updaterSourcePath -Destination $installedUpdaterPath -Force

@@ -7,7 +7,11 @@ if ([String]::IsNullOrEmpty($ProgramPath)) {
     if (Test-Path -LiteralPath $installedPath) {
         $ProgramPath = $installedPath
     } else {
-        $ProgramPath = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "dist\TailMsg.exe"
+        $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+        $ProgramPath = Join-Path $scriptDirectory "TailMsg.exe"
+        if (-not (Test-Path -LiteralPath $ProgramPath)) {
+            $ProgramPath = Join-Path $scriptDirectory "dist\TailMsg.exe"
+        }
     }
 }
 

@@ -65,6 +65,7 @@ if ($LASTEXITCODE -ne 0) {
     /optimize+ `
     /platform:$Architecture `
     /win32icon:"$projectDirectory\assets\ninja.ico" `
+    "/resource:$publicKey,TailMsg.UpdatePublicKey" `
     /out:"$outputDirectory\TailMsgUpdater.exe" `
     /reference:System.dll `
     /reference:System.Core.dll `

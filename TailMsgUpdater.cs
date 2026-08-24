@@ -1031,20 +1031,8 @@ namespace TailMsgUpdater
                 try
                 {
                     tcpProbe = new TcpListener(IPAddress.Any, 38257);
-                    try
-                    {
-                        tcpProbe.Server.ExclusiveAddressUse = true;
-                    }
-                    catch { }
                     tcpProbe.Start();
-                    udpProbe = new UdpClient(AddressFamily.InterNetwork);
-                    try
-                    {
-                        udpProbe.Client.ExclusiveAddressUse = true;
-                    }
-                    catch { }
-                    udpProbe.Client.Bind(
-                        new IPEndPoint(IPAddress.Any, 38258));
+                    udpProbe = new UdpClient(38258);
                     return;
                 }
                 catch (Exception exception)

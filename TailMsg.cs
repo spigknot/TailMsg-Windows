@@ -2541,29 +2541,13 @@ namespace TailMsg
                 try
                 {
                     tcpListener = new TcpListener(IPAddress.Any, tcpPort);
-                    try
-                    {
-                        tcpListener.Server.ExclusiveAddressUse = true;
-                    }
-                    catch
-                    {
-                        // Mantém compatibilidade com ambientes Wine/Mono que
-                        // não expõem essa opção no socket.
-                    }
                     tcpListener.Start();
 
-                    udpClient = new UdpClient(AddressFamily.InterNetwork);
-                    try
-                    {
-                        udpClient.Client.ExclusiveAddressUse = true;
-                    }
-                    catch
-                    {
-                        // Alguns ambientes Wine/Mono podem não expor essa
-                        // opção; o bind abaixo continua sendo obrigatório.
-                    }
-                    udpClient.Client.Bind(
-                        new IPEndPoint(IPAddress.Any, discoveryPort));
+                    // Mantém o bind original do TailMsg. Em Windows e Wine,
+                    // o socket UDP pode permanecer registrado por alguns
+                    // instantes durante a troca de processo; exigir
+                    // ExclusiveAddressUse aqui impediria a recuperação normal.
+                    udpClient = new UdpClient(discoveryPort);
                     udpClient.EnableBroadcast = true;
 
                     // Participa do grupo de multicast de descoberta para

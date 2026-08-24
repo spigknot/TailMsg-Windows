@@ -2341,10 +2341,24 @@ namespace TailMsg
             byte[] data = Encoding.UTF8.GetBytes(request);
             HashSet<string> sent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (IPAddress address in NetworkDiscovery.GetDiscoveryTargets())
+            foreach (NetworkEndpoint endpoint in NetworkDiscovery.GetEndpoints())
+            {
+                IPAddress address;
+                if (!String.IsNullOrEmpty(endpoint.BroadcastAddress) &&
+                    IPAddress.TryParse(endpoint.BroadcastAddress, out address))
+                {
+                    SendPacket(data, address, sent);
+                }
+            }
+            foreach (IPAddress address in TailscaleDiscovery.FindPeerAddresses())
             {
                 SendPacket(data, address, sent);
             }
+
+            // Broadcast limitado: alcança a rede local mesmo quando a
+            // enumeração de interfaces não funciona (Wine/Mono).
+            SendPacket(data, IPAddress.Parse(DiscoveryMulticast), sent);
+            SendPacket(data, IPAddress.Parse("255.255.255.255"), sent);
         }
 
         private void SendPacket(byte[] data, IPAddress address, HashSet<string> sent)
@@ -2801,35 +2815,15 @@ namespace TailMsg
                 shells.Add("/usr/bin/bash");
                 shells.Add("/bin/bash");
 
-                DateTime wineDeadline = DateTime.UtcNow.AddSeconds(6);
-
-                // Fallback opcional: algumas instalações expõem a LocalAPI TCP
-                // apenas para clientes locais. Ela é consultada primeiro porque
-                // não exige iniciar um shell Unix através do Wine.
-                string apiSource;
-                if (TryReadWineLocalApi(addresses, out apiSource))
-                {
-                    lastSuccessSource = apiSource;
-                    lastAttemptSummary = apiSource;
-                    wineCachedAddresses = new List<IPAddress>(addresses);
-                    wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
-                    return new List<IPAddress>(addresses);
-                }
-
                 foreach (string shell in UniqueStrings(shells))
                 {
                     foreach (string binary in UniqueStrings(binaries))
                     {
-                        int timeoutMilliseconds = RemainingMilliseconds(
-                            wineDeadline,
-                            1200);
-                        if (timeoutMilliseconds <= 0) break;
                         string output;
                         string command = "exec " + ShellQuote(binary) + " status --json";
                         if (TryRunWineUnixShell(
                             shell,
                             command,
-                            timeoutMilliseconds,
                             out output))
                         {
                             int found = AddAddressesFromOutput(output, addresses);
@@ -2852,15 +2846,10 @@ namespace TailMsg
 
                     // Permite que o PATH do host seja usado quando o Tailscale
                     // estiver instalado fora dos caminhos usuais.
-                    int pathTimeoutMilliseconds = RemainingMilliseconds(
-                        wineDeadline,
-                        1200);
-                    if (pathTimeoutMilliseconds <= 0) break;
                     string pathOutput;
                     if (TryRunWineUnixShell(
                         shell,
                         "command -v tailscale >/dev/null 2>&1 && exec tailscale status --json",
-                        pathTimeoutMilliseconds,
                         out pathOutput))
                     {
                         int found = AddAddressesFromOutput(pathOutput, addresses);
@@ -2880,6 +2869,20 @@ namespace TailMsg
                     }
                 }
 
+                // Fallback opcional: algumas instalações expõem a LocalAPI TCP
+                // apenas para clientes locais. A URL pode ser substituída por
+                // TAILMSG_TAILSCALE_API; nenhum comportamento Windows passa por
+                // este bloco.
+                string apiSource;
+                if (TryReadWineLocalApi(addresses, out apiSource))
+                {
+                    lastSuccessSource = apiSource;
+                    lastAttemptSummary = apiSource;
+                    wineCachedAddresses = new List<IPAddress>(addresses);
+                    wineCacheExpiresUtc = DateTime.UtcNow.AddSeconds(4);
+                    return new List<IPAddress>(addresses);
+                }
+
                 lastAttemptSummary = attempts.Length == 0
                     ? "Wine: nenhuma estratégia executada"
                     : "Wine: " + attempts.ToString();
@@ -2892,7 +2895,6 @@ namespace TailMsg
         private static bool TryRunWineUnixShell(
             string unixShell,
             string shellCommand,
-            int timeoutMilliseconds,
             out string output)
         {
             output = "";
@@ -2906,7 +2908,6 @@ namespace TailMsg
                 " > " + ShellQuote(unixOutputPath) +
                 " 2>&1; printf '\\n" + marker + "\\n' >> " +
                 ShellQuote(unixOutputPath);
-            bool completed = false;
 
             try
             {
@@ -2922,9 +2923,9 @@ namespace TailMsg
 
                 using (Process process = Process.Start(info))
                 {
-                    DateTime deadline = DateTime.UtcNow.AddMilliseconds(
-                        Math.Max(100, timeoutMilliseconds));
+                    DateTime deadline = DateTime.UtcNow.AddMilliseconds(5000);
                     string content = "";
+                    bool completed = false;
                     while (DateTime.UtcNow < deadline)
                     {
                         content = ReadWineOutput(wineOutputPath, unixOutputPath);
@@ -2965,7 +2966,7 @@ namespace TailMsg
                     }
                 }
 
-                return completed;
+                return output.Length > 0;
             }
             catch (Exception exception)
             {

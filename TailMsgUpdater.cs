@@ -19,8 +19,8 @@ namespace TailMsgUpdater
 {
     internal static class Program
     {
-        private const string CurrentVersion = "20260823_002";
-        private const string GitHubRepository = "spigknot/TailMsg-Windows";
+        private const string CurrentVersion = TailMsg.UpdateConfig.CurrentVersion;
+        private const string GitHubRepository = TailMsg.UpdateConfig.GitHubRepository;
         private const string LatestReleaseUrl =
             "https://api.github.com/repos/" + GitHubRepository + "/releases/latest";
         private const string GitHubUserAgent = "TailMsgUpdater/" + CurrentVersion;
@@ -35,6 +35,13 @@ namespace TailMsgUpdater
             public string DownloadUrl;
             public string Sha256;
             public long Size;
+        }
+
+        private sealed class InstallTransaction
+        {
+            public string TargetDirectory;
+            public string BackupDirectory;
+            public List<string> InstalledRelativePaths;
         }
 
         private sealed class TimeoutWebClient : WebClient
@@ -84,25 +91,144 @@ namespace TailMsgUpdater
                         testValue,
                         "true",
                         StringComparison.OrdinalIgnoreCase);
-
-                WaitForApplication(processId);
-                WaitForNetworkPorts();
-                InstallPackage(zipPath, targetDirectory);
-                if (!testOnly)
+                bool isolated = options.TryGetValue(
+                    "--isolated",
+                    out testValue) &&
+                    String.Equals(
+                        testValue,
+                        "true",
+                        StringComparison.OrdinalIgnoreCase);
+                bool quiet = options.TryGetValue(
+                    "--quiet",
+                    out testValue) &&
+                    String.Equals(
+                        testValue,
+                        "true",
+                        StringComparison.OrdinalIgnoreCase);
+                string operationId = options.ContainsKey("--operation-id")
+                    ? options["--operation-id"]
+                    : UpdateJournal.CreateOperation(targetDirectory, CurrentVersion);
+                string expectedVersion = options.ContainsKey("--expected-version")
+                    ? options["--expected-version"]
+                    : CurrentVersion;
+                if (options.ContainsKey("--operation-id"))
                 {
-                    ConfigureUser(targetDirectory);
-                    ConfigureFirewallIfElevated(targetDirectory);
-                    StartApplication(targetDirectory);
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "created",
+                        expectedVersion,
+                        targetDirectory,
+                        "worker-attached");
+                }
+                InstallTransaction transaction = null;
+
+                try
+                {
+                    WaitForApplication(processId);
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "app-closed",
+                        expectedVersion,
+                        targetDirectory,
+                        "pid=" + processId);
+                    if (!isolated && !testOnly) WaitForNetworkPorts();
+                    transaction = InstallPackage(zipPath, targetDirectory, operationId);
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "package-applied",
+                        expectedVersion,
+                        targetDirectory,
+                        "");
+                    if (IsTrue(options, "--simulate-failure-after-apply"))
+                    {
+                        throw new InvalidOperationException(
+                            "Falha simulada depois da aplicação do pacote.");
+                    }
+                    if (testOnly)
+                    {
+                        UpdateJournal.WriteState(
+                            operationId,
+                            "test-only-completed",
+                            expectedVersion,
+                            targetDirectory,
+                            "");
+                        CommitTransaction(transaction);
+                        return;
+                    }
+
+                    if (!isolated)
+                    {
+                        ConfigureUser(targetDirectory);
+                        ConfigureFirewallIfElevated(targetDirectory);
+                    }
+                    StartApplication(targetDirectory, operationId, expectedVersion, isolated);
+                    if (!UpdateJournal.WaitForState(operationId, "app-confirmed", 30000))
+                    {
+                        throw new InvalidOperationException(
+                            "A nova instância não confirmou a versão após o reinício. Estado: " +
+                            UpdateJournal.ReadLastState(operationId));
+                    }
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "completed",
+                        expectedVersion,
+                        targetDirectory,
+                        "post-install-confirmed");
+                    CommitTransaction(transaction);
+                }
+                catch (Exception exception)
+                {
+                    if (transaction != null)
+                    {
+                        try
+                        {
+                            CloseTailMsgInTarget(targetDirectory);
+                            RollbackTransaction(transaction);
+                            UpdateJournal.WriteState(
+                                operationId,
+                                "rollback",
+                                expectedVersion,
+                                targetDirectory,
+                                exception.Message);
+                        }
+                        catch (Exception rollbackException)
+                        {
+                            UpdateJournal.WriteState(
+                                operationId,
+                                "rollback-failed",
+                                expectedVersion,
+                                targetDirectory,
+                                rollbackException.Message);
+                        }
+                    }
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "failed",
+                        expectedVersion,
+                        targetDirectory,
+                        exception.Message);
+                    throw;
                 }
             }
             catch (Exception exception)
             {
-                MessageBox.Show(
-                    "A atualização automática não pôde ser concluída.\r\n\r\n" +
-                    exception.Message,
-                    "TailMsg - erro na atualização",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                bool quiet = false;
+                if (args != null)
+                {
+                    Dictionary<string, string> quietOptions = ParseArguments(args);
+                    string quietValue;
+                    quiet = quietOptions.TryGetValue("--quiet", out quietValue) &&
+                        String.Equals(quietValue, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (quiet)
+                    Console.Error.WriteLine("ERRO: " + exception.Message);
+                else
+                    MessageBox.Show(
+                        "A atualização automática não pôde ser concluída.\r\n\r\n" +
+                        exception.Message,
+                        "TailMsg - erro na atualização",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
                 Environment.ExitCode = 1;
             }
         }
@@ -113,13 +239,113 @@ namespace TailMsgUpdater
             string zipPath = Require(options, "--zip");
             string targetDirectory = Path.GetFullPath(
                 Require(options, "--target"));
+            bool testOnly = IsTrue(options, "--test-only");
+            bool isolated = IsTrue(options, "--isolated");
+            string expectedVersion = options.ContainsKey("--expected-version")
+                ? options["--expected-version"]
+                : ReadPackageVersion(zipPath);
+            string operationId = options.ContainsKey("--operation-id")
+                ? options["--operation-id"]
+                : UpdateJournal.CreateOperation(targetDirectory, expectedVersion);
+            InstallTransaction transaction = null;
+            if (options.ContainsKey("--operation-id"))
+            {
+                UpdateJournal.WriteState(
+                    operationId,
+                    "created",
+                    expectedVersion,
+                    targetDirectory,
+                    "standalone-attached");
+            }
 
             ValidateStandaloneTarget(targetDirectory);
-            CloseTailMsgInTarget(targetDirectory);
-            InstallPackage(zipPath, targetDirectory);
-            ConfigureUser(targetDirectory);
-            ConfigureFirewallIfElevated(targetDirectory);
-            StartApplication(targetDirectory);
+            try
+            {
+                CloseTailMsgInTarget(targetDirectory);
+                UpdateJournal.WriteState(
+                    operationId,
+                    "app-closed",
+                    expectedVersion,
+                    targetDirectory,
+                    "standalone");
+                if (!isolated && !testOnly) WaitForNetworkPorts();
+                transaction = InstallPackage(zipPath, targetDirectory, operationId);
+                UpdateJournal.WriteState(
+                    operationId,
+                    "package-applied",
+                    expectedVersion,
+                    targetDirectory,
+                    "standalone");
+                if (IsTrue(options, "--simulate-failure-after-apply"))
+                {
+                    throw new InvalidOperationException(
+                        "Falha simulada depois da aplicação do pacote.");
+                }
+                if (testOnly)
+                {
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "test-only-completed",
+                        expectedVersion,
+                        targetDirectory,
+                        "standalone");
+                    CommitTransaction(transaction);
+                    return;
+                }
+
+                if (!isolated)
+                {
+                    ConfigureUser(targetDirectory);
+                    ConfigureFirewallIfElevated(targetDirectory);
+                }
+                StartApplication(targetDirectory, operationId, expectedVersion, isolated);
+                if (!UpdateJournal.WaitForState(operationId, "app-confirmed", 30000))
+                {
+                    throw new InvalidOperationException(
+                        "A nova instância não confirmou a versão após o reinício. Estado: " +
+                        UpdateJournal.ReadLastState(operationId));
+                }
+                UpdateJournal.WriteState(
+                    operationId,
+                    "completed",
+                    expectedVersion,
+                    targetDirectory,
+                    "standalone-post-install-confirmed");
+                CommitTransaction(transaction);
+            }
+            catch (Exception exception)
+            {
+                if (transaction != null)
+                {
+                    try
+                    {
+                        CloseTailMsgInTarget(targetDirectory);
+                        RollbackTransaction(transaction);
+                        UpdateJournal.WriteState(
+                            operationId,
+                            "rollback",
+                            expectedVersion,
+                            targetDirectory,
+                            exception.Message);
+                    }
+                    catch (Exception rollbackException)
+                    {
+                        UpdateJournal.WriteState(
+                            operationId,
+                            "rollback-failed",
+                            expectedVersion,
+                            targetDirectory,
+                            rollbackException.Message);
+                    }
+                }
+                UpdateJournal.WriteState(
+                    operationId,
+                    "failed",
+                    expectedVersion,
+                    targetDirectory,
+                    exception.Message);
+                throw;
+            }
         }
 
         private static FullRelease LoadLatestFullRelease()
@@ -735,9 +961,10 @@ namespace TailMsgUpdater
             }
         }
 
-        private static void InstallPackage(
+        private static InstallTransaction InstallPackage(
             string zipPath,
-            string targetDirectory)
+            string targetDirectory,
+            string operationId)
         {
             if (!File.Exists(zipPath))
             {
@@ -750,10 +977,12 @@ namespace TailMsgUpdater
                 Path.GetTempPath(),
                 "TailMsgUpdate-" + Guid.NewGuid().ToString("N"));
             string backupDirectory = Path.Combine(
-                Path.GetTempPath(),
-                "TailMsgBackup-" + Guid.NewGuid().ToString("N"));
+                targetDirectory,
+                ".tailmsg-update-backup-" + operationId);
             Directory.CreateDirectory(extractionDirectory);
+            Directory.CreateDirectory(backupDirectory);
             List<string> copiedDestinations = new List<string>();
+            List<string> installedRelativePaths = new List<string>();
             Dictionary<string, string> backups =
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -821,8 +1050,21 @@ namespace TailMsgUpdater
                     }
 
                     copiedDestinations.Add(destination);
+                    installedRelativePaths.Add(relative);
                     CopyWithRetry(sourceFile, destination, true);
                 }
+
+                File.WriteAllLines(
+                    Path.Combine(backupDirectory, "installed-files.txt"),
+                    installedRelativePaths.ToArray(),
+                    new UTF8Encoding(false));
+
+                return new InstallTransaction
+                {
+                    TargetDirectory = targetDirectory,
+                    BackupDirectory = backupDirectory,
+                    InstalledRelativePaths = installedRelativePaths
+                };
             }
             catch
             {
@@ -843,6 +1085,12 @@ namespace TailMsgUpdater
                     }
                     catch { }
                 }
+                try
+                {
+                    if (Directory.Exists(backupDirectory))
+                        Directory.Delete(backupDirectory, true);
+                }
+                catch { }
                 throw;
             }
             finally
@@ -852,12 +1100,101 @@ namespace TailMsgUpdater
                     Directory.Delete(extractionDirectory, true);
                 }
                 catch { }
+            }
+        }
+
+        private static void CommitTransaction(InstallTransaction transaction)
+        {
+            if (transaction == null || String.IsNullOrEmpty(transaction.BackupDirectory)) return;
+            try
+            {
+                if (Directory.Exists(transaction.BackupDirectory))
+                    Directory.Delete(transaction.BackupDirectory, true);
+            }
+            catch (Exception exception)
+            {
+                throw new IOException(
+                    "A atualização foi confirmada, mas o backup não pôde ser removido.",
+                    exception);
+            }
+        }
+
+        private static void RollbackTransaction(InstallTransaction transaction)
+        {
+            if (transaction == null) return;
+            string targetRoot = transaction.TargetDirectory.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string installedList = Path.Combine(
+                transaction.BackupDirectory,
+                "installed-files.txt");
+            List<string> installed = new List<string>();
+            if (File.Exists(installedList))
+            {
+                installed.AddRange(File.ReadAllLines(installedList, Encoding.UTF8));
+            }
+
+            foreach (string relative in installed)
+            {
+                string destination = Path.GetFullPath(
+                    Path.Combine(transaction.TargetDirectory, relative));
+                if (!destination.StartsWith(
+                    targetRoot,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        "O journal contém um caminho de rollback inválido.");
+                }
                 try
                 {
-                    Directory.Delete(backupDirectory, true);
+                    if (File.Exists(destination)) File.Delete(destination);
                 }
-                catch { }
+                catch (Exception exception)
+                {
+                    throw new IOException(
+                        "Não foi possível remover arquivo durante o rollback: " + relative,
+                        exception);
+                }
             }
+
+            if (Directory.Exists(transaction.BackupDirectory))
+            {
+                foreach (string backupFile in Directory.GetFiles(
+                    transaction.BackupDirectory,
+                    "*",
+                    SearchOption.AllDirectories))
+                {
+                    if (String.Equals(
+                        Path.GetFileName(backupFile),
+                        "installed-files.txt",
+                        StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    string relative = backupFile.Substring(
+                        transaction.BackupDirectory.Length)
+                        .TrimStart(
+                            Path.DirectorySeparatorChar,
+                            Path.AltDirectorySeparatorChar);
+                    string destination = Path.GetFullPath(
+                        Path.Combine(transaction.TargetDirectory, relative));
+                    if (!destination.StartsWith(
+                        targetRoot,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            "O backup contém um caminho de rollback inválido.");
+                    }
+                    string parent = Path.GetDirectoryName(destination);
+                    if (!Directory.Exists(parent)) Directory.CreateDirectory(parent);
+                    CopyWithRetry(backupFile, destination, true);
+                }
+            }
+
+            try
+            {
+                if (Directory.Exists(transaction.BackupDirectory))
+                    Directory.Delete(transaction.BackupDirectory, true);
+            }
+            catch { }
         }
 
         private static void ExtractSafely(
@@ -1020,7 +1357,11 @@ namespace TailMsgUpdater
             }
         }
 
-        private static void StartApplication(string targetDirectory)
+        private static void StartApplication(
+            string targetDirectory,
+            string operationId,
+            string expectedVersion,
+            bool isolated)
         {
             string applicationPath = Path.Combine(
                 targetDirectory,
@@ -1028,19 +1369,22 @@ namespace TailMsgUpdater
             ProcessStartInfo info = new ProcessStartInfo();
             info.FileName = applicationPath;
             info.Arguments = "--background";
+            if (!String.IsNullOrEmpty(operationId))
+            {
+                info.Arguments +=
+                    " --update-operation-id " + Quote(operationId) +
+                    " --update-expected-version " + Quote(expectedVersion);
+                if (isolated)
+                {
+                    info.Arguments +=
+                        " --test-instance " + Quote(operationId) +
+                        " --test-no-network" +
+                        " --test-exit-after-confirm";
+                }
+            }
             info.WorkingDirectory = targetDirectory;
             info.UseShellExecute = true;
             Process.Start(info);
-
-            string backupPath = Path.Combine(
-                targetDirectory,
-                "TailMsg.exe.bak");
-            Thread.Sleep(1500);
-            try
-            {
-                if (File.Exists(backupPath)) File.Delete(backupPath);
-            }
-            catch { }
         }
 
         private static Dictionary<string, string> ParseArguments(
@@ -1073,6 +1417,39 @@ namespace TailMsgUpdater
                     "Parâmetro obrigatório ausente: " + name);
             }
             return value;
+        }
+
+        private static bool IsTrue(
+            Dictionary<string, string> options,
+            string name)
+        {
+            string value;
+            return options.TryGetValue(name, out value) &&
+                String.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ReadPackageVersion(string zipPath)
+        {
+            using (ZipArchive archive = ZipFile.OpenRead(zipPath))
+            {
+                foreach (ZipArchiveEntry entry in archive.Entries)
+                {
+                    if (!String.Equals(
+                        entry.FullName,
+                        "version.txt",
+                        StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    using (Stream stream = entry.Open())
+                    using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+                    {
+                        string version = (reader.ReadToEnd() ?? "").Trim();
+                        if (Regex.IsMatch(version, @"^\d{8}_\d{3}$"))
+                            return version;
+                    }
+                }
+            }
+            throw new InvalidDataException(
+                "O pacote não contém uma versão válida em version.txt.");
         }
 
         private sealed class StandaloneUpdaterForm : Form

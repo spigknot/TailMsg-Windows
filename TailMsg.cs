@@ -27,26 +27,51 @@ namespace TailMsg
                 return;
             }
 
+            if (args.Length == 1 && args[0] == "--integration-self-test")
+            {
+                RunIntegrationSelfTest();
+                return;
+            }
+
             if (args.Length >= 1 && args[0] == "--diagnose")
             {
                 RunDiagnostics(args.Length >= 2 ? args[1] : null);
                 return;
             }
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-
-            if (args.Length >= 2 && !args[0].StartsWith("--", StringComparison.Ordinal))
+            ConfirmUpdateStartup(args);
+            if (HasArgument(args, "--test-exit-after-confirm"))
             {
-                string[] messageParts = new string[args.Length - 1];
-                Array.Copy(args, 1, messageParts, 0, messageParts.Length);
-                CommandLineMode.Send(args[0], String.Join(" ", messageParts));
                 return;
             }
 
-            bool startHidden = args.Length == 1 && args[0] == "--background";
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            bool quietCommand = args.Length > 0 &&
+                (String.Equals(args[0], "--quiet", StringComparison.OrdinalIgnoreCase) ||
+                 String.Equals(args[0], "--silent", StringComparison.OrdinalIgnoreCase));
+            int commandStart = quietCommand ? 1 : 0;
+            if (args.Length - commandStart >= 2 &&
+                !args[commandStart].StartsWith("--", StringComparison.Ordinal))
+            {
+                string[] messageParts = new string[args.Length - commandStart - 1];
+                Array.Copy(args, commandStart + 1, messageParts, 0, messageParts.Length);
+                CommandLineMode.Send(
+                    args[commandStart],
+                    String.Join(" ", messageParts),
+                    quietCommand);
+                return;
+            }
+
+            bool startHidden = HasArgument(args, "--background");
+            bool disableNetwork = HasArgument(args, "--test-no-network");
+            string testInstance = GetArgumentValue(args, "--test-instance");
+            string mutexName = String.IsNullOrEmpty(testInstance)
+                ? @"Local\TailMsg-8E47A034"
+                : @"Local\TailMsg-Test-" + SanitizeMutexPart(testInstance);
             bool createdNew;
-            using (Mutex instanceMutex = new Mutex(true, @"Local\TailMsg-8E47A034", out createdNew))
+            using (Mutex instanceMutex = new Mutex(true, mutexName, out createdNew))
             {
                 if (!createdNew)
                 {
@@ -57,9 +82,78 @@ namespace TailMsg
                     return;
                 }
 
-                StartupRegistration.EnsureRegistered();
-                Application.Run(new MainForm(startHidden));
+                if (!disableNetwork) StartupRegistration.EnsureRegistered();
+                Application.Run(new MainForm(startHidden, disableNetwork));
             }
+        }
+
+        private static string SanitizeMutexPart(string value)
+        {
+            StringBuilder result = new StringBuilder();
+            foreach (char item in value ?? "")
+            {
+                if ((item >= 'a' && item <= 'z') ||
+                    (item >= 'A' && item <= 'Z') ||
+                    (item >= '0' && item <= '9') || item == '-')
+                    result.Append(item);
+            }
+            return result.Length == 0 ? "instance" : result.ToString();
+        }
+
+        private static void ConfirmUpdateStartup(string[] args)
+        {
+            string operationId = GetArgumentValue(args, "--update-operation-id");
+            if (String.IsNullOrEmpty(operationId)) return;
+            string expectedVersion = GetArgumentValue(args, "--update-expected-version");
+            if (String.Equals(
+                expectedVersion,
+                UpdateConfig.CurrentVersion,
+                StringComparison.Ordinal))
+            {
+                UpdateJournal.WriteState(
+                    operationId,
+                    "app-started",
+                    expectedVersion,
+                    Application.StartupPath,
+                    "process-started");
+                UpdateJournal.WriteState(
+                    operationId,
+                    "app-confirmed",
+                    expectedVersion,
+                    Application.StartupPath,
+                    "version-confirmed");
+            }
+            else
+            {
+                UpdateJournal.WriteState(
+                    operationId,
+                    "app-version-mismatch",
+                    expectedVersion,
+                    Application.StartupPath,
+                    "expected=" + expectedVersion + ";actual=" + UpdateConfig.CurrentVersion);
+            }
+        }
+
+        private static bool HasArgument(string[] args, string expected)
+        {
+            if (args == null) return false;
+            foreach (string arg in args)
+            {
+                if (String.Equals(arg, expected, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private static string GetArgumentValue(string[] args, string name)
+        {
+            if (args == null) return "";
+            for (int index = 0; index + 1 < args.Length; index++)
+            {
+                if (String.Equals(args[index], name, StringComparison.OrdinalIgnoreCase))
+                    return args[index + 1];
+            }
+            return "";
         }
 
         private static void RunSelfTest()
@@ -85,6 +179,19 @@ namespace TailMsg
             }
 
             Console.WriteLine("OK - protocolo e filtros de endereço funcionando.");
+        }
+
+        private static void RunIntegrationSelfTest()
+        {
+            string failure;
+            if (IntegrationSelfTest.TryRun(out failure))
+            {
+                Console.WriteLine("OK - descoberta UDP, envio TCP e ACK funcionando.");
+                return;
+            }
+
+            Console.Error.WriteLine("Falha no teste integrado: " + failure);
+            Environment.ExitCode = 1;
         }
 
         private static void RunDiagnostics(string remoteAddressArg)
@@ -502,63 +609,119 @@ namespace TailMsg
 
     internal static class CommandLineMode
     {
-        public static void Send(string computerName, string message)
+        public static void Send(
+            string computerName,
+            string message,
+            bool quiet)
         {
             computerName = (computerName ?? "").Trim();
             message = (message ?? "").Trim();
 
             if (computerName.Length == 0 || message.Length == 0)
             {
-                MessageBox.Show(
-                    "Uso:\r\n\r\ntailmsg NOME_DO_PC \"Mensagem\"",
+                Report(
+                    quiet,
+                    false,
+                    "Uso:\r\n\r\ntailmsg [--quiet|--silent] NOME_DO_PC \"Mensagem\"",
                     "TailMsg - linha de comando",
-                    MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
+                Environment.ExitCode = 1;
                 return;
             }
 
             if (message.Length > TailMsgProtocol.MaxCommandLineMessageCharacters)
             {
-                MessageBox.Show(
+                Report(
+                    quiet,
+                    false,
                     "A mensagem excede o limite de " +
                     TailMsgProtocol.MaxCommandLineMessageCharacters +
                     " caracteres da linha de comando.",
                     "TailMsg - erro",
-                    MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+                Environment.ExitCode = 1;
                 return;
             }
 
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            string fingerprint = TailMsgDiagnostics.ComputeFingerprint(
+                Environment.MachineName,
+                message);
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "attempt_started",
+                "pending",
+                computerName,
+                "",
+                fingerprint,
+                0,
+                "source=cli");
             PeerInfo peer;
             string discoveryError;
-            if (!CommandLineDiscovery.TryFindComputer(computerName, 4000, out peer, out discoveryError))
+            if (!CommandLineDiscovery.TryFindComputer(
+                computerName,
+                4000,
+                operationId,
+                out peer,
+                out discoveryError))
             {
-                MessageBox.Show(
+                Report(
+                    quiet,
+                    false,
                     discoveryError,
                     "TailMsg - computador não encontrado",
-                    MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+                Environment.ExitCode = 1;
                 return;
             }
 
-            MessageSendResult result = MessageSender.Send(peer, Environment.MachineName, message);
+            MessageSendResult result = MessageSender.Send(
+                peer,
+                Environment.MachineName,
+                message,
+                operationId);
             if (result.Success)
             {
-                MessageBox.Show(
+                Report(
+                    quiet,
+                    true,
                     "Mensagem entregue a " + peer.Name + ".\r\n\r\nEndereço usado: " + peer.Address,
                     "TailMsg - mensagem enviada",
-                    MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
             }
             else
             {
-                MessageBox.Show(
+                Report(
+                    quiet,
+                    false,
                     "Falha ao enviar para " + peer.Name + " (" + peer.Address + ").\r\n\r\n" +
                     result.ErrorMessage,
                     "TailMsg - erro no envio",
-                    MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+                Environment.ExitCode = 1;
             }
+        }
+
+        private static void Report(
+            bool quiet,
+            bool success,
+            string text,
+            string title,
+            MessageBoxIcon icon)
+        {
+            if (quiet)
+            {
+                string oneLine = text.Replace("\r", " ").Replace("\n", " ");
+                if (success) Console.WriteLine("OK: " + oneLine);
+                else Console.Error.WriteLine("ERRO: " + oneLine);
+                return;
+            }
+
+            MessageBox.Show(
+                text,
+                title,
+                MessageBoxButtons.OK,
+                icon);
         }
     }
 
@@ -567,12 +730,23 @@ namespace TailMsg
         public static bool TryFindComputer(
             string computerName,
             int waitMilliseconds,
+            string operationId,
             out PeerInfo selectedPeer,
             out string error)
         {
             selectedPeer = null;
             error = "";
             List<PeerInfo> matches = new List<PeerInfo>();
+            DateTime started = DateTime.UtcNow;
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "discovery_started",
+                "pending",
+                computerName,
+                "",
+                "",
+                0,
+                "targets=" + NetworkDiscovery.GetDiscoveryTargets().Count);
 
             try
             {
@@ -610,6 +784,15 @@ namespace TailMsg
                             if (preferred != null)
                             {
                                 selectedPeer = preferred;
+                                TailMsgDiagnostics.WriteMessageEvent(
+                                    operationId,
+                                    "discovery_completed",
+                                    "success",
+                                    selectedPeer.Name,
+                                    selectedPeer.Address,
+                                    "",
+                                    ElapsedMilliseconds(started),
+                                    "priority=delegacia");
                                 return true;
                             }
 
@@ -638,6 +821,15 @@ namespace TailMsg
             catch (Exception exception)
             {
                 error = "A descoberta de rede falhou: " + exception.Message;
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "discovery_completed",
+                    "failed",
+                    computerName,
+                    "",
+                    "",
+                    ElapsedMilliseconds(started),
+                    exception.Message);
                 return false;
             }
 
@@ -645,6 +837,15 @@ namespace TailMsg
             {
                 error = "Nenhum TailMsg ativo com o nome \"" + computerName + "\" foi encontrado.\r\n\r\n" +
                     "Verifique se o computador está ligado, se o TailMsg está em segundo plano e se o firewall permite UDP 38258.";
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "discovery_completed",
+                    "not_found",
+                    computerName,
+                    "",
+                    "",
+                    ElapsedMilliseconds(started),
+                    "matches=0");
                 return false;
             }
 
@@ -657,7 +858,21 @@ namespace TailMsg
             });
 
             selectedPeer = matches[0];
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "discovery_completed",
+                "success",
+                selectedPeer.Name,
+                selectedPeer.Address,
+                "",
+                ElapsedMilliseconds(started),
+                "matches=" + matches.Count);
             return true;
+        }
+
+        private static long ElapsedMilliseconds(DateTime started)
+        {
+            return (long)(DateTime.UtcNow - started).TotalMilliseconds;
         }
 
         private static PeerInfo FindDelegaciaPeer(List<PeerInfo> peers)
@@ -748,6 +963,7 @@ namespace TailMsg
         private readonly System.Windows.Forms.Timer discoveryTimer;
         private readonly System.Windows.Forms.Timer restoreTimer;
         private readonly bool startHidden;
+        private readonly bool disableNetwork;
         private AboutForm aboutForm;
         private readonly List<ReceivedMessageForm> receivedNotifications =
             new List<ReceivedMessageForm>();
@@ -759,8 +975,16 @@ namespace TailMsg
         private UpdateManifest availableUpdate;
 
         public MainForm(bool startInBackground)
+            : this(startInBackground, false)
+        {
+        }
+
+        public MainForm(
+            bool startInBackground,
+            bool disableNetwork)
         {
             startHidden = startInBackground;
+            this.disableNetwork = disableNetwork;
             localComputerName = Environment.MachineName;
             networkService = new NetworkService(localComputerName);
             networkService.MessageReceived += NetworkServiceMessageReceived;
@@ -1016,21 +1240,28 @@ namespace TailMsg
 
             Shown += delegate
             {
-                try
+                if (!disableNetwork)
                 {
-                    networkService.Start();
-                    statusLabel.Text = "Serviço ativo. Procurando TailMsg na rede...";
-                }
-                catch (Exception exception)
-                {
-                    statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
-                    statusLabel.Text = "Não foi possível iniciar o serviço.";
-                    MessageBox.Show(this, exception.Message, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+                    try
+                    {
+                        networkService.Start();
+                        statusLabel.Text = "Serviço ativo. Procurando TailMsg na rede...";
+                    }
+                    catch (Exception exception)
+                    {
+                        statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                        statusLabel.Text = "Não foi possível iniciar o serviço.";
+                        MessageBox.Show(this, exception.Message, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
 
-                RefreshComputers();
-                discoveryTimer.Start();
-                CheckForUpdates(false);
+                    RefreshComputers();
+                    discoveryTimer.Start();
+                    CheckForUpdates(false);
+                }
+                else
+                {
+                    statusLabel.Text = "Modo de validação: rede desativada.";
+                }
 
                 if (startHidden)
                 {
@@ -1556,11 +1787,39 @@ namespace TailMsg
         {
             if (IsDisposed)
             {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    e.OperationId,
+                    "ui_received",
+                    "dropped",
+                    e.SenderName,
+                    e.RemoteAddress,
+                    e.Fingerprint,
+                    0,
+                    "form-disposed");
                 return;
             }
 
+            TailMsgDiagnostics.WriteMessageEvent(
+                e.OperationId,
+                "ui_queued",
+                "success",
+                e.SenderName,
+                e.RemoteAddress,
+                e.Fingerprint,
+                0,
+                "");
+
             TryBeginInvoke(delegate
             {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    e.OperationId,
+                    "ui_shown",
+                    "success",
+                    e.SenderName,
+                    e.RemoteAddress,
+                    e.Fingerprint,
+                    0,
+                    "");
                 string line = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): " + e.Message;
                 inboxBox.AppendText(line + Environment.NewLine);
@@ -2005,21 +2264,42 @@ namespace TailMsg
         public string SenderName;
         public string Message;
         public string RemoteAddress;
+        public string OperationId;
+        public string Fingerprint;
     }
 
     internal sealed class MessageSendResult
     {
         public bool Success;
         public string ErrorMessage;
+        public string OperationId;
+        public string Fingerprint;
 
-        public static MessageSendResult Succeeded()
+        public static MessageSendResult Succeeded(
+            string operationId,
+            string fingerprint)
         {
-            return new MessageSendResult { Success = true, ErrorMessage = "" };
+            return new MessageSendResult
+            {
+                Success = true,
+                ErrorMessage = "",
+                OperationId = operationId,
+                Fingerprint = fingerprint
+            };
         }
 
-        public static MessageSendResult Failed(string error)
+        public static MessageSendResult Failed(
+            string error,
+            string operationId,
+            string fingerprint)
         {
-            return new MessageSendResult { Success = false, ErrorMessage = error };
+            return new MessageSendResult
+            {
+                Success = false,
+                ErrorMessage = error,
+                OperationId = operationId,
+                Fingerprint = fingerprint
+            };
         }
     }
 
@@ -2066,6 +2346,9 @@ namespace TailMsg
         private const int MaximumMessageLineBytes =
             TailMsgProtocol.MaxGuiMessageCharacters * 4 + 8192;
         private readonly string localName;
+        private readonly int tcpPort;
+        private readonly int discoveryPort;
+        private readonly bool allowLoopback;
         private readonly object peersLock = new object();
         private readonly Dictionary<string, PeerInfo> peers = new Dictionary<string, PeerInfo>(StringComparer.OrdinalIgnoreCase);
         private TcpListener tcpListener;
@@ -2075,8 +2358,40 @@ namespace TailMsg
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
 
         public NetworkService(string name)
+            : this(name, TcpPort, DiscoveryPort, false)
+        {
+        }
+
+        internal NetworkService(
+            string name,
+            int tcpPort,
+            int discoveryPort,
+            bool allowLoopback)
         {
             localName = name;
+            this.tcpPort = tcpPort;
+            this.discoveryPort = discoveryPort;
+            this.allowLoopback = allowLoopback;
+        }
+
+        internal int ListeningTcpPort
+        {
+            get
+            {
+                if (tcpListener == null || tcpListener.LocalEndpoint == null)
+                    return tcpPort;
+                return ((IPEndPoint)tcpListener.LocalEndpoint).Port;
+            }
+        }
+
+        internal int ListeningDiscoveryPort
+        {
+            get
+            {
+                if (udpClient == null || udpClient.Client.LocalEndPoint == null)
+                    return discoveryPort;
+                return ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
+            }
         }
 
         public void Start()
@@ -2091,38 +2406,41 @@ namespace TailMsg
             {
                 try
                 {
-                    tcpListener = new TcpListener(IPAddress.Any, TcpPort);
+                    tcpListener = new TcpListener(IPAddress.Any, tcpPort);
                     tcpListener.Start();
 
-                    udpClient = new UdpClient(DiscoveryPort);
+                    udpClient = new UdpClient(discoveryPort);
                     udpClient.EnableBroadcast = true;
 
                     // Participa do grupo de multicast de descoberta para
                     // responder a requisições que chegam por ele.
                     try
                     {
-                        IPAddress multicastAddress = IPAddress.Parse(DiscoveryMulticast);
-                        foreach (NetworkEndpoint endpoint in NetworkDiscovery.GetEndpoints())
+                        if (!allowLoopback)
                         {
+                            IPAddress multicastAddress = IPAddress.Parse(DiscoveryMulticast);
+                            foreach (NetworkEndpoint endpoint in NetworkDiscovery.GetEndpoints())
+                            {
+                                try
+                                {
+                                    udpClient.Client.SetSocketOption(
+                                        SocketOptionLevel.IP,
+                                        SocketOptionName.AddMembership,
+                                        new MulticastOption(
+                                            multicastAddress,
+                                            IPAddress.Parse(endpoint.LocalAddress)));
+                                }
+                                catch { }
+                            }
                             try
                             {
                                 udpClient.Client.SetSocketOption(
                                     SocketOptionLevel.IP,
                                     SocketOptionName.AddMembership,
-                                    new MulticastOption(
-                                        multicastAddress,
-                                        IPAddress.Parse(endpoint.LocalAddress)));
+                                    new MulticastOption(multicastAddress));
                             }
                             catch { }
                         }
-                        try
-                        {
-                            udpClient.Client.SetSocketOption(
-                                SocketOptionLevel.IP,
-                                SocketOptionName.AddMembership,
-                                new MulticastOption(multicastAddress));
-                        }
-                        catch { }
                     }
                     catch { }
 
@@ -2218,6 +2536,9 @@ namespace TailMsg
         {
             TcpClient client = (TcpClient)state;
             string remoteAddress = "desconhecido";
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            string fingerprint = "";
+            string senderName = "";
 
             try
             {
@@ -2236,8 +2557,9 @@ namespace TailMsg
                     string[] pieces = line.Split('|');
                     if (pieces.Length >= 4 && pieces[0] == TailMsgProtocol.Message && pieces[1] == "1")
                     {
-                        string senderName = TailMsgProtocol.Decode(pieces[2]);
+                        senderName = TailMsgProtocol.Decode(pieces[2]);
                         string message = TailMsgProtocol.Decode(pieces[3]);
+                        fingerprint = TailMsgDiagnostics.ComputeFingerprint(senderName, message);
 
                         if (message.Length > TailMsgProtocol.MaxGuiMessageCharacters)
                         {
@@ -2249,16 +2571,45 @@ namespace TailMsg
                         eventArgs.SenderName = senderName;
                         eventArgs.Message = message;
                         eventArgs.RemoteAddress = remoteAddress;
+                        eventArgs.OperationId = operationId;
+                        eventArgs.Fingerprint = fingerprint;
+                        TailMsgDiagnostics.WriteMessageEvent(
+                            operationId,
+                            "received",
+                            "success",
+                            senderName,
+                            remoteAddress,
+                            fingerprint,
+                            0,
+                            "");
                         EventHandler<MessageReceivedEventArgs> handler = MessageReceived;
                         if (handler != null) handler(this, eventArgs);
 
                         writer.WriteLine(TailMsgProtocol.Acknowledgement + "|1|OK");
                         writer.Flush();
+                        TailMsgDiagnostics.WriteMessageEvent(
+                            operationId,
+                            "ack_sent",
+                            "success",
+                            senderName,
+                            remoteAddress,
+                            fingerprint,
+                            0,
+                            "");
                     }
                 }
             }
-            catch
+            catch (Exception exception)
             {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "received",
+                    "failed",
+                    senderName,
+                    remoteAddress,
+                    fingerprint,
+                    0,
+                    exception.Message);
                 // A conexão interrompida não deve derrubar o serviço de mensagens.
             }
             finally
@@ -2330,8 +2681,14 @@ namespace TailMsg
 
         private void SendDiscoveryResponse(IPEndPoint remote)
         {
-            string address = NetworkDiscovery.FindBestLocalAddress(remote.Address);
-            byte[] response = Encoding.UTF8.GetBytes(TailMsgProtocol.BuildDiscoveryResponse(localName, address, TcpPort));
+            string address = allowLoopback && IPAddress.IsLoopback(remote.Address)
+                ? "127.0.0.1"
+                : NetworkDiscovery.FindBestLocalAddress(remote.Address);
+            byte[] response = Encoding.UTF8.GetBytes(
+                TailMsgProtocol.BuildDiscoveryResponse(
+                    localName,
+                    address,
+                    ListeningTcpPort));
             try { udpClient.Send(response, response.Length, remote); } catch { }
         }
 
@@ -2361,13 +2718,46 @@ namespace TailMsg
             SendPacket(data, IPAddress.Parse("255.255.255.255"), sent);
         }
 
+        internal void SendDiscoveryRequestForTest(
+            IPAddress address,
+            int port,
+            string operationId)
+        {
+            if (!allowLoopback || udpClient == null)
+            {
+                throw new InvalidOperationException(
+                    "A descoberta direta só está disponível no modo de teste.");
+            }
+
+            byte[] data = Encoding.UTF8.GetBytes(
+                TailMsgProtocol.BuildDiscoveryRequest(localName));
+            udpClient.Send(data, data.Length, new IPEndPoint(address, port));
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "discovery_request_sent",
+                "success",
+                localName,
+                address.ToString(),
+                "",
+                0,
+                "port=" + port);
+        }
+
+        internal List<PeerInfo> GetPeersSnapshot()
+        {
+            lock (peersLock)
+            {
+                return new List<PeerInfo>(peers.Values);
+            }
+        }
+
         private void SendPacket(byte[] data, IPAddress address, HashSet<string> sent)
         {
             string key = address.ToString();
             if (!sent.Add(key)) return;
             try
             {
-                IPEndPoint target = new IPEndPoint(address, DiscoveryPort);
+                IPEndPoint target = new IPEndPoint(address, discoveryPort);
                 udpClient.Send(data, data.Length, target);
             }
             catch { }
@@ -2377,14 +2767,18 @@ namespace TailMsg
         {
             foreach (NetworkEndpoint endpoint in NetworkDiscovery.GetEndpoints())
             {
-                AddPeer(localName, endpoint.LocalAddress, TcpPort, true);
+                AddPeer(localName, endpoint.LocalAddress, ListeningTcpPort, true);
             }
         }
 
         private void AddPeer(string name, string address, int port, bool isLocal)
         {
             if (String.IsNullOrEmpty(address) || address == "0.0.0.0") return;
-            if (!NetworkDiscovery.IsTailMsgAddress(IPAddress.Parse(address))) return;
+            IPAddress parsedAddress;
+            if (!IPAddress.TryParse(address, out parsedAddress)) return;
+            if (!allowLoopback && !NetworkDiscovery.IsTailMsgAddress(parsedAddress)) return;
+            if (allowLoopback && !NetworkDiscovery.IsTailMsgAddress(parsedAddress) &&
+                !IPAddress.IsLoopback(parsedAddress)) return;
 
             // Broadcast e multicast podem voltar para a própria máquina.
             isLocal = isLocal || NetworkDiscovery.IsLocalAddress(address);
@@ -3154,16 +3548,89 @@ namespace TailMsg
     {
         public static MessageSendResult Send(PeerInfo peer, string senderName, string message)
         {
+            return Send(peer, senderName, message, null);
+        }
+
+        public static MessageSendResult Send(
+            PeerInfo peer,
+            string senderName,
+            string message,
+            string operationId)
+        {
+            if (String.IsNullOrEmpty(operationId))
+            {
+                operationId = TailMsgDiagnostics.CreateOperationId();
+            }
+            string fingerprint = TailMsgDiagnostics.ComputeFingerprint(senderName, message);
+            DateTime started = DateTime.UtcNow;
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "attempt_started",
+                "pending",
+                peer == null ? "" : peer.Name,
+                peer == null ? "" : peer.Address,
+                fingerprint,
+                0,
+                "source=network");
+
+            if (peer == null || String.IsNullOrEmpty(peer.Address) || peer.Port <= 0)
+            {
+                string invalid = "O destinatário da mensagem é inválido.";
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "completed",
+                    "failed",
+                    "",
+                    "",
+                    fingerprint,
+                    ElapsedMilliseconds(started),
+                    invalid);
+                return MessageSendResult.Failed(invalid, operationId, fingerprint);
+            }
+
             TcpClient client = new TcpClient();
             try
             {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "peer_selected",
+                    "success",
+                    peer.Name,
+                    peer.Address,
+                    fingerprint,
+                    ElapsedMilliseconds(started),
+                    "port=" + peer.Port);
                 IAsyncResult connection = client.BeginConnect(peer.Address, peer.Port, null, null);
                 if (!connection.AsyncWaitHandle.WaitOne(4000))
                 {
-                    return MessageSendResult.Failed("O computador não respondeu na porta do TailMsg (38257). Verifique o firewall do Windows.");
+                    string timeout = "O computador não respondeu na porta do TailMsg (38257). Verifique o firewall do Windows.";
+                    TailMsgDiagnostics.WriteMessageEvent(
+                        operationId,
+                        "tcp_connect",
+                        "timeout",
+                        peer.Name,
+                        peer.Address,
+                        fingerprint,
+                        ElapsedMilliseconds(started),
+                        timeout);
+                    return Failed(
+                        timeout,
+                        operationId,
+                        fingerprint,
+                        peer,
+                        started);
                 }
 
                 client.EndConnect(connection);
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "tcp_connect",
+                    "success",
+                    peer.Name,
+                    peer.Address,
+                    fingerprint,
+                    ElapsedMilliseconds(started),
+                    "");
                 client.SendTimeout = 6000;
                 client.ReceiveTimeout = 6000;
 
@@ -3172,23 +3639,97 @@ namespace TailMsg
                 {
                     writer.WriteLine(TailMsgProtocol.BuildMessage(senderName, message));
                     writer.Flush();
+                    TailMsgDiagnostics.WriteMessageEvent(
+                        operationId,
+                        "payload_sent",
+                        "success",
+                        peer.Name,
+                        peer.Address,
+                        fingerprint,
+                        ElapsedMilliseconds(started),
+                        "bytes=redacted");
                     string response = NetworkService.ReadLineLimited(stream, 1024);
                     if (response == TailMsgProtocol.Acknowledgement + "|1|OK")
                     {
-                        return MessageSendResult.Succeeded();
+                        TailMsgDiagnostics.WriteMessageEvent(
+                            operationId,
+                            "ack_received",
+                            "success",
+                            peer.Name,
+                            peer.Address,
+                            fingerprint,
+                            ElapsedMilliseconds(started),
+                            "");
+                        return Succeeded(
+                            operationId,
+                            fingerprint,
+                            peer,
+                            started);
                     }
                 }
 
-                return MessageSendResult.Failed("O computador recebeu uma resposta inválida.");
+                return Failed(
+                    "O computador recebeu uma resposta inválida.",
+                    operationId,
+                    fingerprint,
+                    peer,
+                    started);
             }
             catch (Exception exception)
             {
-                return MessageSendResult.Failed("Não foi possível entregar a mensagem: " + exception.Message);
+                return Failed(
+                    "Não foi possível entregar a mensagem: " + exception.Message,
+                    operationId,
+                    fingerprint,
+                    peer,
+                    started);
             }
             finally
             {
                 try { client.Close(); } catch { }
             }
+        }
+
+        private static MessageSendResult Succeeded(
+            string operationId,
+            string fingerprint,
+            PeerInfo peer,
+            DateTime started)
+        {
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "completed",
+                "success",
+                peer.Name,
+                peer.Address,
+                fingerprint,
+                ElapsedMilliseconds(started),
+                "");
+            return MessageSendResult.Succeeded(operationId, fingerprint);
+        }
+
+        private static MessageSendResult Failed(
+            string error,
+            string operationId,
+            string fingerprint,
+            PeerInfo peer,
+            DateTime started)
+        {
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "completed",
+                "failed",
+                peer == null ? "" : peer.Name,
+                peer == null ? "" : peer.Address,
+                fingerprint,
+                ElapsedMilliseconds(started),
+                error);
+            return MessageSendResult.Failed(error, operationId, fingerprint);
+        }
+
+        private static long ElapsedMilliseconds(DateTime started)
+        {
+            return (long)(DateTime.UtcNow - started).TotalMilliseconds;
         }
     }
 }

@@ -53,6 +53,10 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 9. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
 10. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
 
+11. Antes de gerar pacote, execute o gate silencioso de validação:
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-smoke.ps1 -Scenario All -Quiet`.
+    O gate deve validar build, protocolo, integração UDP/TCP, ACK e o journal do updater.
+
 ## 1. Pré-requisitos (antes de começar)
 
 1. **`gh` autenticado** como `spigknot`: `gh auth status` (se falhar: `gh auth login`).

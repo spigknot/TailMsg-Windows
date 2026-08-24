@@ -105,10 +105,17 @@ namespace TailMsg
         {
             ThreadPool.QueueUserWorkItem(delegate
             {
+                string operationId = "";
+                string applicationDirectory = "";
                 try
                 {
                     EnableTls12();
                     ValidateManifest(manifest);
+
+                    applicationDirectory = Path.GetDirectoryName(ApplicationPath());
+                    operationId = UpdateJournal.CreateOperation(
+                        applicationDirectory,
+                        manifest.Version);
 
                     string updateDirectory = Path.Combine(
                         Environment.GetFolderPath(
@@ -127,11 +134,22 @@ namespace TailMsg
                             zipPath);
                     }
 
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "downloaded",
+                        manifest.Version,
+                        applicationDirectory,
+                        "file=" + manifest.FileId);
+
                     if (downloaded != null) downloaded();
                     ValidatePackage(zipPath, manifest);
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "validated",
+                        manifest.Version,
+                        applicationDirectory,
+                        "sha256=" + manifest.Sha256 + ";size=" + manifest.Size);
 
-                    string applicationDirectory = Path.GetDirectoryName(
-                        ApplicationPath());
                     string updaterPath = Path.Combine(
                         applicationDirectory,
                         "TailMsgUpdater.exe");
@@ -153,15 +171,33 @@ namespace TailMsg
                     info.Arguments =
                         "--zip " + Quote(zipPath) +
                         " --target " + Quote(applicationDirectory) +
-                        " --pid " + Process.GetCurrentProcess().Id;
+                        " --pid " + Process.GetCurrentProcess().Id +
+                        " --operation-id " + Quote(operationId) +
+                        " --expected-version " + Quote(manifest.Version);
                     info.UseShellExecute = false;
                     info.CreateNoWindow = true;
                     Process.Start(info);
+
+                    UpdateJournal.WriteState(
+                        operationId,
+                        "worker-started",
+                        manifest.Version,
+                        applicationDirectory,
+                        "updater-started");
 
                     readyToClose();
                 }
                 catch (Exception exception)
                 {
+                    if (!String.IsNullOrEmpty(operationId))
+                    {
+                        UpdateJournal.WriteState(
+                            operationId,
+                            "failed",
+                            manifest == null ? "" : manifest.Version,
+                            applicationDirectory,
+                            exception.Message);
+                    }
                     failed(exception.Message);
                 }
             });

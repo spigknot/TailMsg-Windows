@@ -91,6 +91,43 @@ O TailMsg procura o nome nas duas redes. Se encontrar o mesmo computador em
 mais de uma interface, usa primeiro o endereço `10.x.x.x`. Ao terminar, exibe
 uma janela informando sucesso e o IP usado, ou o erro encontrado.
 
+Para automação sem janela, use `--quiet` ou `--silent` antes do destinatário;
+o processo retorna código zero somente quando a entrega foi confirmada:
+
+```text
+tailmsg --quiet NOME_DO_PC "Olá, bom dia!"
+```
+
+## Validação e diagnóstico
+
+Execute os comandos abaixo a partir da pasta que contém o executável. Eles não
+alteram a configuração de rede nem enviam mensagens para outros computadores.
+
+```powershell
+TailMsg.exe --self-test
+TailMsg.exe --integration-self-test
+TailMsg.exe --diagnose
+TailMsg.exe --diagnose 10.x.x.x
+```
+
+`--self-test` valida o protocolo, UTF-8, o limite da interface e os filtros de
+endereço. `--integration-self-test` usa endpoints UDP/TCP isolados em loopback
+para exercitar descoberta, envio, recebimento e ACK. `--diagnose` examina as
+interfaces 10.x/100.x, peers Tailscale, UDP, multicast e, quando informado,
+uma porta TCP remota. O diagnóstico é salvo em
+`%LOCALAPPDATA%\TailMsg\tailmsg-diagnose.txt`.
+
+Em Wine, quando o Tailscale está instalado no Linux, podem ser informados:
+
+```bash
+TAILMSG_TAILSCALE_BIN=/usr/bin/tailscale \
+TAILMSG_WINE_BASH=/usr/bin/bash \
+wine "C:\\Program Files\\TailMsg\\TailMsg.exe" --diagnose
+```
+
+O diagnóstico não prova que uma mensagem foi entregue; para isso use um envio
+CLI controlado ou o smoke test versionado em `tests\run-smoke.ps1`.
+
 ## Tailscale
 
 O TailMsg não tenta varrer cegamente toda a faixa `100.64.0.0/10`, pois isso

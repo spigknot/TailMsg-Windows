@@ -53,7 +53,9 @@ if (-not (Test-Path -LiteralPath $publicKey)) {
     /reference:System.Windows.Forms.dll `
     "$projectDirectory\TailMsg.cs" `
     "$projectDirectory\TailMsgUpdate.cs" `
-    "$projectDirectory\UpdateConfig.cs"
+    "$projectDirectory\UpdateConfig.cs" `
+    "$projectDirectory\TailMsgDiagnostics.cs" `
+    "$projectDirectory\UpdateJournal.cs"
 
 if ($LASTEXITCODE -ne 0) {
     throw "A compilação do TailMsg falhou."
@@ -73,7 +75,9 @@ if ($LASTEXITCODE -ne 0) {
     /reference:System.IO.Compression.FileSystem.dll `
     /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `
-    "$projectDirectory\TailMsgUpdater.cs"
+    "$projectDirectory\TailMsgUpdater.cs" `
+    "$projectDirectory\UpdateConfig.cs" `
+    "$projectDirectory\UpdateJournal.cs"
 
 if ($LASTEXITCODE -ne 0) {
     throw "A compilação do atualizador do TailMsg falhou."

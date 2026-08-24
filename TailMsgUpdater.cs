@@ -1032,7 +1032,9 @@ namespace TailMsgUpdater
                 {
                     tcpProbe = new TcpListener(IPAddress.Any, 38257);
                     tcpProbe.Start();
-                    udpProbe = new UdpClient(38258);
+                    udpProbe = new UdpClient(AddressFamily.InterNetwork);
+                    udpProbe.Client.Bind(
+                        new IPEndPoint(IPAddress.Any, 38258));
                     return;
                 }
                 catch (Exception exception)

@@ -1327,6 +1327,21 @@ namespace TailMsg
                     ? "network-disabled-test"
                     : "";
                 bool showServiceError = false;
+                bool updateConfirmed = false;
+
+                // O updater legado pode manter sondas de porta abertas até
+                // receber app-confirmed. Confirmar o processo antes do bind
+                // de rede permite que ele termine e libere esses sockets;
+                // a inicialização do serviço continua sendo tentada logo
+                // abaixo e não altera o comportamento de uma abertura normal.
+                if (updateStartup != null && updateStartup.VersionMatches)
+                {
+                    updateConfirmed = Program.CompleteUpdateStartup(
+                        updateStartup,
+                        true,
+                        "application-started");
+                }
+
                 if (!disableNetwork)
                 {
                     try
@@ -1349,24 +1364,24 @@ namespace TailMsg
                     statusLabel.Text = "Modo de validação: rede desativada.";
                 }
 
-                if (updateStartup != null)
+                if (updateStartup != null && !updateConfirmed)
                 {
                     Program.CompleteUpdateStartup(
                         updateStartup,
                         serviceReady,
                         serviceDetail);
-                    if (exitAfterUpdateConfirmation)
-                    {
-                        allowExit = true;
-                        BeginInvoke((MethodInvoker)delegate { Close(); });
-                        return;
-                    }
                 }
 
-                // Durante uma atualização, o updater precisa receber o estado
-                // app-service-failed antes de qualquer caixa modal. Caso
-                // contrário, a janela bloqueia o evento Shown e o updater só
-                // enxerga app-started até estourar o timeout.
+                if (updateStartup != null && exitAfterUpdateConfirmation)
+                {
+                    allowExit = true;
+                    BeginInvoke((MethodInvoker)delegate { Close(); });
+                    return;
+                }
+
+                // A falha de rede durante uma atualização já não deve fechar
+                // a nova instância: o updater foi confirmado pelo processo e
+                // o serviço pode ser recuperado na próxima tentativa normal.
                 if (showServiceError && updateStartup == null)
                 {
                     MessageBox.Show(
@@ -2557,11 +2572,14 @@ namespace TailMsg
                     tcpListener = new TcpListener(IPAddress.Any, tcpPort);
                     tcpListener.Start();
 
-                    // Mantém o bind original do TailMsg. Em Windows e Wine,
-                    // o socket UDP pode permanecer registrado por alguns
-                    // instantes durante a troca de processo; exigir
-                    // ExclusiveAddressUse aqui impediria a recuperação normal.
-                    udpClient = new UdpClient(discoveryPort);
+                    // O construtor UdpClient(port) aplica uma política de
+                    // exclusividade que pode rejeitar a troca de processo
+                    // enquanto o registro UDP anterior ainda está sendo
+                    // liberado. O bind explícito mantém a compatibilidade
+                    // com Windows e Wine durante esse handoff.
+                    udpClient = new UdpClient(AddressFamily.InterNetwork);
+                    udpClient.Client.Bind(
+                        new IPEndPoint(IPAddress.Any, discoveryPort));
                     udpClient.EnableBroadcast = true;
 
                     // Participa do grupo de multicast de descoberta para

@@ -212,7 +212,7 @@ a fonte da verdade e deve evoluir com a prática.
 | `Upload aparece no bucket sig, mas não no TailMsg` | foi reutilizado `cfg['bucket']` do JSON compartilhado do SIG | copiar somente as credenciais S3 e forçar `bucket = tailmsg`; conferir também a URL pública `pub-ce3b9c72...r2.dev` |
 | `gh release create` falha e release fica em draft | upload interrompido | `gh release edit YYYYMMDD_NNN --repo spigknot/TailMsg-Windows --draft=false` |
 | ZIP publicado no R2 com SHA divergente do manifesto | subiu arquivo errado (ex.: rezip local) | SEMPRE usar o ZIP de `release/packages/` gerado pelo `package-release.ps1`; conferir SHA antes do upload |
-| Nova instância falha com erro de endereço de soquete durante a atualização | o updater legado iniciou o pacote enquanto os sockets da instância anterior ainda estavam sendo liberados | manter o encerramento explícito do `NetworkService` antes do fechamento, o retry de inicialização de 25 s e fazer o cliente extrair o `TailMsgUpdater.exe` do ZIP validado |
+| Nova instância falha com erro de endereço de soquete durante a atualização | o updater legado iniciou o pacote enquanto os sockets da instância anterior ainda estavam sendo liberados e aguardava `app-confirmed` enquanto mantinha sondas abertas | confirmar o processo antes do bind durante a atualização, manter o encerramento explícito do `NetworkService`, o retry de inicialização de 25 s e fazer o cliente extrair o `TailMsgUpdater.exe` do ZIP validado |
 
 ---
 

@@ -26,7 +26,7 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 - **Versão nova**: a versão atual está em `UpdateConfig.cs` → `CurrentVersion`, mas a data da nova versão **NUNCA é herdada automaticamente da versão anterior**. O campo `YYYYMMDD` deve ser sempre a data local do dia em que o novo pacote está sendo gerado. No primeiro release daquele dia use `_001`; em releases adicionais no mesmo dia, use o próximo número livre (`_002`, `_003` etc.). Antes do bump, confira os pacotes locais e as releases/objetos publicados para não reutilizar uma versão. Exemplo obrigatório: se a última versão for `20260823_005` e o pacote for gerado em `2026-08-24`, a nova versão será `20260824_001`; uma segunda versão gerada em `2026-08-24` será `20260824_002`.
 - **Arquivos do projeto**:
   - `TailMsg.cs` — app principal (WinForms).
-  - `TailMsgUpdate.cs` — cliente de atualização (consulta R2 + GitHub, valida, baixa e dispara o updater).
+  - `TailMsgUpdate.cs` — cliente de atualização (consulta R2 + GitHub, valida, baixa e dispara o updater contido no próprio ZIP).
   - `TailMsgUpdater.cs` — atualizador independente (instala o ZIP no diretório do app).
   - `UpdateConfig.cs` — `CurrentVersion`, `R2PublicBase`, `ManifestFileName`, `GitHubRepository`.
   - `release/update-private-key.xml` — assina os manifestos (NUNCA commitar; NUNCA entrar no ZIP).
@@ -212,6 +212,7 @@ a fonte da verdade e deve evoluir com a prática.
 | `Upload aparece no bucket sig, mas não no TailMsg` | foi reutilizado `cfg['bucket']` do JSON compartilhado do SIG | copiar somente as credenciais S3 e forçar `bucket = tailmsg`; conferir também a URL pública `pub-ce3b9c72...r2.dev` |
 | `gh release create` falha e release fica em draft | upload interrompido | `gh release edit YYYYMMDD_NNN --repo spigknot/TailMsg-Windows --draft=false` |
 | ZIP publicado no R2 com SHA divergente do manifesto | subiu arquivo errado (ex.: rezip local) | SEMPRE usar o ZIP de `release/packages/` gerado pelo `package-release.ps1`; conferir SHA antes do upload |
+| Nova instância falha com erro de endereço de soquete durante a atualização | o updater legado iniciou o pacote enquanto os sockets da instância anterior ainda estavam sendo liberados | manter o encerramento explícito do `NetworkService` antes do fechamento, o retry de inicialização de 25 s e fazer o cliente extrair o `TailMsgUpdater.exe` do ZIP validado |
 
 ---
 

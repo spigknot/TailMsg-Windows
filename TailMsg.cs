@@ -1449,6 +1449,14 @@ namespace TailMsg
                 return;
             }
 
+            // Libera as portas antes de o processo desaparecer. Isso evita
+            // que o updater inicie a nova instância durante a janela em que
+            // o Windows ainda registra os sockets da instância anterior.
+            if (allowExit)
+            {
+                networkService.Stop();
+            }
+
             base.OnFormClosing(e);
         }
 
@@ -1645,6 +1653,7 @@ namespace TailMsg
                     {
                         BeginInvoke((MethodInvoker)delegate
                         {
+                            networkService.Stop();
                             allowExit = true;
                             notifyIcon.Visible = false;
                             Close();
@@ -2536,7 +2545,12 @@ namespace TailMsg
             }
 
             Exception lastError = null;
-            for (int attempt = 0; attempt < 40 && !running; attempt++)
+            // O updater legado podia prosseguir depois de 15 segundos mesmo
+            // quando o socket anterior ainda estava registrado. O updater
+            // atual aguarda a mesma ordem de grandeza; manter 25 segundos
+            // de tentativas permite que a nova instância sobreviva a esse
+            // handoff sem alterar as portas de produção.
+            for (int attempt = 0; attempt < 100 && !running; attempt++)
             {
                 try
                 {

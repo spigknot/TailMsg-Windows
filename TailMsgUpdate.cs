@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -150,21 +151,11 @@ namespace TailMsg
                         applicationDirectory,
                         "sha256=" + manifest.Sha256 + ";size=" + manifest.Size);
 
-                    string updaterPath = Path.Combine(
-                        applicationDirectory,
-                        "TailMsgUpdater.exe");
-                    if (!File.Exists(updaterPath))
-                    {
-                        throw new FileNotFoundException(
-                            "O instalador auxiliar TailMsgUpdater.exe não foi encontrado. " +
-                            "Execute install.ps1 uma vez para habilitar atualizações automáticas.",
-                            updaterPath);
-                    }
-
-                    string temporaryUpdater = Path.Combine(
-                        Path.GetTempPath(),
-                        "TailMsgUpdater-" + Guid.NewGuid().ToString("N") + ".exe");
-                    File.Copy(updaterPath, temporaryUpdater, true);
+                    // O updater do pacote já foi validado pelo hash assinado.
+                    // Usá-lo aqui evita que uma instalação antiga continue
+                    // executando regras de atualização incompatíveis com o
+                    // pacote novo, especialmente durante o handoff das portas.
+                    string temporaryUpdater = ExtractUpdaterFromPackage(zipPath);
 
                     ProcessStartInfo info = new ProcessStartInfo();
                     info.FileName = temporaryUpdater;
@@ -269,6 +260,60 @@ namespace TailMsg
             {
                 throw new CryptographicException(
                     "O pacote baixado foi alterado ou está corrompido.");
+            }
+        }
+
+        private static string ExtractUpdaterFromPackage(string zipPath)
+        {
+            string temporaryUpdater = Path.Combine(
+                Path.GetTempPath(),
+                "TailMsgUpdater-" + Guid.NewGuid().ToString("N") + ".exe");
+
+            try
+            {
+                using (ZipArchive archive = ZipFile.OpenRead(zipPath))
+                {
+                    ZipArchiveEntry entry = null;
+                    foreach (ZipArchiveEntry candidate in archive.Entries)
+                    {
+                        if (String.Equals(
+                            candidate.FullName,
+                            "TailMsgUpdater.exe",
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            entry = candidate;
+                            break;
+                        }
+                    }
+
+                    if (entry == null || entry.Length <= 0)
+                    {
+                        throw new InvalidDataException(
+                            "O pacote não contém TailMsgUpdater.exe.");
+                    }
+
+                    using (Stream source = entry.Open())
+                    using (FileStream target = new FileStream(
+                        temporaryUpdater,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.Read))
+                    {
+                        source.CopyTo(target);
+                    }
+                }
+
+                return temporaryUpdater;
+            }
+            catch
+            {
+                try
+                {
+                    if (File.Exists(temporaryUpdater))
+                        File.Delete(temporaryUpdater);
+                }
+                catch { }
+                throw;
             }
         }
 

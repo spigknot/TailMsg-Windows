@@ -49,6 +49,8 @@ if (-not (Test-Path -LiteralPath $publicKey)) {
     /out:"$outputDirectory\TailMsg.exe" `
     /reference:System.dll `
     /reference:System.Core.dll `
+    /reference:System.IO.Compression.dll `
+    /reference:System.IO.Compression.FileSystem.dll `
     /reference:System.Drawing.dll `
     /reference:System.Windows.Forms.dll `
     "$projectDirectory\TailMsg.cs" `

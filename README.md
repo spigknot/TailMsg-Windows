@@ -108,6 +108,7 @@ TailMsg.exe --self-test
 TailMsg.exe --integration-self-test
 TailMsg.exe --diagnose
 TailMsg.exe --diagnose 10.x.x.x
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-smoke.ps1 -Scenario All -Quiet
 ```
 
 `--self-test` valida o protocolo, UTF-8, o limite da interface e os filtros de
@@ -127,6 +128,10 @@ wine "C:\\Program Files\\TailMsg\\TailMsg.exe" --diagnose
 
 O diagnóstico não prova que uma mensagem foi entregue; para isso use um envio
 CLI controlado ou o smoke test versionado em `tests\run-smoke.ps1`.
+
+O cenário `Wine` do smoke registra `SKIP` em um host Windows nativo. Executado
+sob Wine, ele exige que o diagnóstico encontre peers Tailscale, evitando que a
+lista de destinatários remotos desapareça sem sinalizar erro.
 
 ## Tailscale
 

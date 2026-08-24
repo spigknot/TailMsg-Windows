@@ -12,12 +12,22 @@ namespace TailMsg
     {
         public static bool TryRun(out string failure)
         {
+            return TryRun(null, out failure);
+        }
+
+        public static bool TryRun(
+            string requestedOperationId,
+            out string failure)
+        {
             failure = "";
             NetworkService receiver = null;
             NetworkService sender = null;
             ManualResetEvent received = new ManualResetEvent(false);
             MessageReceivedEventArgs receivedArgs = null;
-            string operationId = TailMsgDiagnostics.CreateOperationId();
+            string operationId = TailMsgDiagnostics.IsSafeOperationId(
+                requestedOperationId)
+                ? requestedOperationId
+                : TailMsgDiagnostics.CreateOperationId();
             try
             {
                 receiver = new NetworkService(
@@ -90,6 +100,14 @@ namespace TailMsg
                     failure = "o conteúdo recebido não corresponde ao enviado";
                     return false;
                 }
+                if (!String.Equals(
+                    receivedArgs.OperationId,
+                    operationId,
+                    StringComparison.Ordinal))
+                {
+                    failure = "a correlação da tentativa não atravessou o receptor";
+                    return false;
+                }
                 return true;
             }
             catch (Exception exception)
@@ -127,6 +145,22 @@ namespace TailMsg
         public static string CreateOperationId()
         {
             return Guid.NewGuid().ToString("N");
+        }
+
+        public static bool IsSafeOperationId(string value)
+        {
+            if (String.IsNullOrEmpty(value) || value.Length > 64)
+                return false;
+            foreach (char item in value)
+            {
+                if (!((item >= 'a' && item <= 'z') ||
+                      (item >= 'A' && item <= 'Z') ||
+                      (item >= '0' && item <= '9') || item == '-'))
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         public static string ComputeFingerprint(string senderName, string message)

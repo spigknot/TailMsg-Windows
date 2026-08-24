@@ -14,6 +14,11 @@
   `TailMsg.exe --integration-self-test` e `tests\run-smoke.ps1 -Scenario All`.
 - `--self-test` valida protocolo e filtros; `--diagnose` valida o ambiente de rede.
 - O smoke test deve ser silencioso, não abrir janelas e retornar código de saída útil.
+- Após um clone novo, ativar os hooks com
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-hooks.ps1 -Quiet`.
+- Mudanças na descoberta Tailscale/Wine exigem uma execução de
+  `TailMsg.exe --diagnose` em um host Wine/Tailscale; ausência de helper ou peer
+  deve ser reportada como limitação ambiental.
 - Para o gate de whitespace, redirecionar `git diff --check` para manter a saída silenciosa;
   não combinar `--quiet`, pois o Git pode tratá-lo como "há diff".
 - Mudanças no `.cs` ou no `build.ps1` precisam atualizar as listas de fontes do compilador.

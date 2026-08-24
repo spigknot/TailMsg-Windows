@@ -168,12 +168,16 @@ namespace TailMsgUpdater
                             "A nova instância não confirmou a versão após o reinício. Estado: " +
                             UpdateJournal.ReadLastState(operationId));
                     }
-                    UpdateJournal.WriteState(
+                    if (!UpdateJournal.WriteState(
                         operationId,
                         "completed",
                         expectedVersion,
                         targetDirectory,
-                        "post-install-confirmed");
+                        "post-install-confirmed"))
+                    {
+                        throw new IOException(
+                            "Não foi possível persistir a conclusão da atualização.");
+                    }
                     CommitTransaction(transaction);
                 }
                 catch (Exception exception)
@@ -305,12 +309,16 @@ namespace TailMsgUpdater
                         "A nova instância não confirmou a versão após o reinício. Estado: " +
                         UpdateJournal.ReadLastState(operationId));
                 }
-                UpdateJournal.WriteState(
+                if (!UpdateJournal.WriteState(
                     operationId,
                     "completed",
                     expectedVersion,
                     targetDirectory,
-                    "standalone-post-install-confirmed");
+                    "standalone-post-install-confirmed"))
+                {
+                    throw new IOException(
+                        "Não foi possível persistir a conclusão da atualização.");
+                }
                 CommitTransaction(transaction);
             }
             catch (Exception exception)

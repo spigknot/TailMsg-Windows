@@ -25,23 +25,27 @@ internal static class UpdateJournal
         string expectedVersion)
     {
         string operationId = Guid.NewGuid().ToString("N");
-        WriteState(
+        if (!WriteState(
             operationId,
             "created",
             expectedVersion,
             targetDirectory,
-            "operation-created");
+            "operation-created"))
+        {
+            throw new IOException(
+                "Não foi possível criar o journal da operação de atualização.");
+        }
         return operationId;
     }
 
-    public static void WriteState(
+    public static bool WriteState(
         string operationId,
         string state,
         string expectedVersion,
         string targetDirectory,
         string detail)
     {
-        if (!IsSafeOperationId(operationId)) return;
+        if (!IsSafeOperationId(operationId)) return false;
         string path = GetPath(operationId);
         string directory = Path.GetDirectoryName(path);
         try
@@ -65,12 +69,14 @@ internal static class UpdateJournal
                         ";target=" + Safe(targetDirectory) +
                         ";detail=" + Safe(detail));
                 }
+                return true;
             }
         }
         catch
         {
             // A journal failure must be handled by the caller as an update
             // failure, but it must not crash the running messenger.
+            return false;
         }
     }
 

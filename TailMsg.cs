@@ -16,6 +16,26 @@ using Microsoft.Win32;
 
 namespace TailMsg
 {
+    internal sealed class UpdateStartupInfo
+    {
+        public readonly string OperationId;
+        public readonly string ExpectedVersion;
+        public readonly bool VersionMatches;
+        public readonly bool AppStartedRecorded;
+
+        public UpdateStartupInfo(
+            string operationId,
+            string expectedVersion,
+            bool versionMatches,
+            bool appStartedRecorded)
+        {
+            OperationId = operationId;
+            ExpectedVersion = expectedVersion;
+            VersionMatches = versionMatches;
+            AppStartedRecorded = appStartedRecorded;
+        }
+    }
+
     internal static class Program
     {
         [STAThread]
@@ -27,9 +47,9 @@ namespace TailMsg
                 return;
             }
 
-            if (args.Length == 1 && args[0] == "--integration-self-test")
+            if (args.Length >= 1 && args[0] == "--integration-self-test")
             {
-                RunIntegrationSelfTest();
+                RunIntegrationSelfTest(args.Length >= 2 ? args[1] : null);
                 return;
             }
 
@@ -39,11 +59,7 @@ namespace TailMsg
                 return;
             }
 
-            ConfirmUpdateStartup(args);
-            if (HasArgument(args, "--test-exit-after-confirm"))
-            {
-                return;
-            }
+            UpdateStartupInfo updateStartup = PrepareUpdateStartup(args);
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -83,7 +99,11 @@ namespace TailMsg
                 }
 
                 if (!disableNetwork) StartupRegistration.EnsureRegistered();
-                Application.Run(new MainForm(startHidden, disableNetwork));
+                Application.Run(new MainForm(
+                    startHidden,
+                    disableNetwork,
+                    updateStartup,
+                    HasArgument(args, "--test-exit-after-confirm")));
             }
         }
 
@@ -100,38 +120,80 @@ namespace TailMsg
             return result.Length == 0 ? "instance" : result.ToString();
         }
 
-        private static void ConfirmUpdateStartup(string[] args)
+        private static UpdateStartupInfo PrepareUpdateStartup(string[] args)
         {
             string operationId = GetArgumentValue(args, "--update-operation-id");
-            if (String.IsNullOrEmpty(operationId)) return;
+            if (String.IsNullOrEmpty(operationId)) return null;
             string expectedVersion = GetArgumentValue(args, "--update-expected-version");
-            if (String.Equals(
+            bool versionMatches = String.Equals(
                 expectedVersion,
                 UpdateConfig.CurrentVersion,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal);
+            bool appStartedRecorded;
+            if (versionMatches)
             {
-                UpdateJournal.WriteState(
+                appStartedRecorded = UpdateJournal.WriteState(
                     operationId,
                     "app-started",
                     expectedVersion,
                     Application.StartupPath,
                     "process-started");
-                UpdateJournal.WriteState(
-                    operationId,
-                    "app-confirmed",
-                    expectedVersion,
-                    Application.StartupPath,
-                    "version-confirmed");
             }
             else
             {
-                UpdateJournal.WriteState(
+                appStartedRecorded = UpdateJournal.WriteState(
                     operationId,
                     "app-version-mismatch",
                     expectedVersion,
                     Application.StartupPath,
                     "expected=" + expectedVersion + ";actual=" + UpdateConfig.CurrentVersion);
             }
+
+            return new UpdateStartupInfo(
+                operationId,
+                expectedVersion,
+                versionMatches,
+                appStartedRecorded);
+        }
+
+        internal static bool CompleteUpdateStartup(
+            UpdateStartupInfo updateStartup,
+            bool serviceReady,
+            string detail)
+        {
+            if (updateStartup == null || !updateStartup.VersionMatches)
+                return false;
+            if (!updateStartup.AppStartedRecorded)
+            {
+                UpdateJournal.WriteState(
+                    updateStartup.OperationId,
+                    "app-journal-failed",
+                    updateStartup.ExpectedVersion,
+                    Application.StartupPath,
+                    "app-started-not-recorded");
+                return false;
+            }
+            if (!serviceReady)
+            {
+                UpdateJournal.WriteState(
+                    updateStartup.OperationId,
+                    "app-service-failed",
+                    updateStartup.ExpectedVersion,
+                    Application.StartupPath,
+                    String.IsNullOrEmpty(detail)
+                        ? "network-service-not-ready"
+                        : detail);
+                return false;
+            }
+
+            return UpdateJournal.WriteState(
+                updateStartup.OperationId,
+                "app-confirmed",
+                updateStartup.ExpectedVersion,
+                Application.StartupPath,
+                String.IsNullOrEmpty(detail)
+                    ? "service-ready"
+                    : detail);
         }
 
         private static bool HasArgument(string[] args, string expected)
@@ -163,6 +225,12 @@ namespace TailMsg
             bool invalidTailscale = NetworkDiscovery.IsTailMsgAddress(IPAddress.Parse("100.63.10.20"));
             string encoded = TailMsgProtocol.Encode("Olá | TailMsg");
             string decoded = TailMsgProtocol.Decode(encoded);
+            List<IPAddress> tailscaleFixture = TailscaleDiscovery.ParsePeerAddressesForTest(
+                "{\"PeerA\":{\"TailscaleIPs\":[\"100.110.211.23\"]}," +
+                "\"PeerB\":{\"TailscaleIPs\":[\"100.127.255.254\",\"100.63.1.2\"]}}" );
+            bool tailscaleParserValid = tailscaleFixture.Count == 2 &&
+                tailscaleFixture.Contains(IPAddress.Parse("100.110.211.23")) &&
+                tailscaleFixture.Contains(IPAddress.Parse("100.127.255.254"));
             string largeMessage = new string(
                 'X',
                 TailMsgProtocol.MaxGuiMessageCharacters);
@@ -171,7 +239,8 @@ namespace TailMsg
                 largeMessage;
 
             if (!valid10 || !validTailscale || invalidTailscale ||
-                decoded != "Olá | TailMsg" || !largeMessageValid)
+                decoded != "Olá | TailMsg" || !largeMessageValid ||
+                !tailscaleParserValid)
             {
                 Console.Error.WriteLine("Falha no teste do protocolo de rede.");
                 Environment.ExitCode = 1;
@@ -181,10 +250,10 @@ namespace TailMsg
             Console.WriteLine("OK - protocolo e filtros de endereço funcionando.");
         }
 
-        private static void RunIntegrationSelfTest()
+        private static void RunIntegrationSelfTest(string operationId)
         {
             string failure;
-            if (IntegrationSelfTest.TryRun(out failure))
+            if (IntegrationSelfTest.TryRun(operationId, out failure))
             {
                 Console.WriteLine("OK - descoberta UDP, envio TCP e ACK funcionando.");
                 return;
@@ -964,6 +1033,8 @@ namespace TailMsg
         private readonly System.Windows.Forms.Timer restoreTimer;
         private readonly bool startHidden;
         private readonly bool disableNetwork;
+        private readonly UpdateStartupInfo updateStartup;
+        private readonly bool exitAfterUpdateConfirmation;
         private AboutForm aboutForm;
         private readonly List<ReceivedMessageForm> receivedNotifications =
             new List<ReceivedMessageForm>();
@@ -975,16 +1046,27 @@ namespace TailMsg
         private UpdateManifest availableUpdate;
 
         public MainForm(bool startInBackground)
-            : this(startInBackground, false)
+            : this(startInBackground, false, null, false)
         {
         }
 
         public MainForm(
             bool startInBackground,
             bool disableNetwork)
+            : this(startInBackground, disableNetwork, null, false)
+        {
+        }
+
+        public MainForm(
+            bool startInBackground,
+            bool disableNetwork,
+            UpdateStartupInfo updateStartup,
+            bool exitAfterUpdateConfirmation)
         {
             startHidden = startInBackground;
             this.disableNetwork = disableNetwork;
+            this.updateStartup = updateStartup;
+            this.exitAfterUpdateConfirmation = exitAfterUpdateConfirmation;
             localComputerName = Environment.MachineName;
             networkService = new NetworkService(localComputerName);
             networkService.MessageReceived += NetworkServiceMessageReceived;
@@ -1240,27 +1322,51 @@ namespace TailMsg
 
             Shown += delegate
             {
+                bool serviceReady = disableNetwork;
+                string serviceDetail = disableNetwork
+                    ? "network-disabled-test"
+                    : "";
                 if (!disableNetwork)
                 {
                     try
                     {
                         networkService.Start();
+                        serviceReady = true;
+                        serviceDetail = "network-service-ready";
                         statusLabel.Text = "Serviço ativo. Procurando TailMsg na rede...";
                     }
                     catch (Exception exception)
                     {
+                        serviceDetail = exception.Message;
                         statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
                         statusLabel.Text = "Não foi possível iniciar o serviço.";
                         MessageBox.Show(this, exception.Message, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
-
-                    RefreshComputers();
-                    discoveryTimer.Start();
-                    CheckForUpdates(false);
                 }
                 else
                 {
                     statusLabel.Text = "Modo de validação: rede desativada.";
+                }
+
+                if (updateStartup != null)
+                {
+                    Program.CompleteUpdateStartup(
+                        updateStartup,
+                        serviceReady,
+                        serviceDetail);
+                    if (exitAfterUpdateConfirmation)
+                    {
+                        allowExit = true;
+                        BeginInvoke((MethodInvoker)delegate { Close(); });
+                        return;
+                    }
+                }
+
+                if (!disableNetwork && (updateStartup == null || serviceReady))
+                {
+                    RefreshComputers();
+                    discoveryTimer.Start();
+                    CheckForUpdates(false);
                 }
 
                 if (startHidden)
@@ -2334,7 +2440,20 @@ namespace TailMsg
 
         public static string BuildMessage(string senderName, string message)
         {
-            return Message + "|1|" + Encode(senderName) + "|" + Encode(message);
+            return BuildMessage(senderName, message, null);
+        }
+
+        public static string BuildMessage(
+            string senderName,
+            string message,
+            string operationId)
+        {
+            string line = Message + "|1|" + Encode(senderName) + "|" + Encode(message);
+            if (TailMsgDiagnostics.IsSafeOperationId(operationId))
+            {
+                line += "|" + operationId;
+            }
+            return line;
         }
     }
 
@@ -2557,6 +2676,11 @@ namespace TailMsg
                     string[] pieces = line.Split('|');
                     if (pieces.Length >= 4 && pieces[0] == TailMsgProtocol.Message && pieces[1] == "1")
                     {
+                        if (pieces.Length >= 5 &&
+                            TailMsgDiagnostics.IsSafeOperationId(pieces[4]))
+                        {
+                            operationId = pieces[4];
+                        }
                         senderName = TailMsgProtocol.Decode(pieces[2]);
                         string message = TailMsgProtocol.Decode(pieces[3]);
                         fingerprint = TailMsgDiagnostics.ComputeFingerprint(senderName, message);
@@ -3456,6 +3580,13 @@ namespace TailMsg
             return found;
         }
 
+        internal static List<IPAddress> ParsePeerAddressesForTest(string output)
+        {
+            List<IPAddress> addresses = new List<IPAddress>();
+            AddAddressesFromOutput(output, addresses);
+            return addresses;
+        }
+
         private static string GetWineStartPath()
         {
             string systemDirectory = Environment.SystemDirectory;
@@ -3637,7 +3768,11 @@ namespace TailMsg
                 using (NetworkStream stream = client.GetStream())
                 using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
                 {
-                    writer.WriteLine(TailMsgProtocol.BuildMessage(senderName, message));
+                    writer.WriteLine(
+                        TailMsgProtocol.BuildMessage(
+                            senderName,
+                            message,
+                            operationId));
                     writer.Flush();
                     TailMsgDiagnostics.WriteMessageEvent(
                         operationId,

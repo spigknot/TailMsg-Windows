@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Network", "Update", "All")]
+    [ValidateSet("Network", "Update", "Wine", "All")]
     [string]$Scenario = "All",
 
     [switch]$Quiet,
@@ -57,19 +57,61 @@ function Read-ProductVersion {
 
 function Run-NetworkScenario {
     Write-Status "[Network] integração UDP/TCP/ACK"
-    Invoke-Executable $tailMsgPath "--integration-self-test" | Out-Null
+    $operationId = [Guid]::NewGuid().ToString("N")
+    Invoke-Executable $tailMsgPath `
+        ("--integration-self-test " + (Quote-Argument $operationId)) | Out-Null
 
     $eventPath = Join-Path $env:LOCALAPPDATA "TailMsg\tailmsg-events.log"
     if (-not (Test-Path -LiteralPath $eventPath)) {
         throw "O teste integrado não produziu o log de eventos: $eventPath"
     }
-    $events = Get-Content -Raw -LiteralPath $eventPath
-    foreach ($stage in @("discovery_request_sent", "payload_sent", "ack_received", "completed")) {
-        if ($events -notmatch ("stage=" + $stage)) {
+    $runEvents = @(Get-Content -LiteralPath $eventPath | Where-Object {
+        $_ -match (";operation=" + [regex]::Escape($operationId) + ";")
+    })
+    if ($runEvents.Count -eq 0) {
+        throw "O teste integrado não produziu eventos para a operação atual."
+    }
+    foreach ($stage in @(
+        "discovery_request_sent",
+        "payload_sent",
+        "received",
+        "ack_sent",
+        "ack_received",
+        "completed")) {
+        if (-not ($runEvents -match ("stage=" + [regex]::Escape($stage)))) {
             throw "O log integrado não contém o estágio esperado: $stage"
         }
     }
     Write-Status "[Network] PASS"
+}
+
+function Run-WineScenario {
+    Write-Status "[Wine] diagnóstico Tailscale/Wine"
+    Invoke-Executable $tailMsgPath "--diagnose" | Out-Null
+    $diagnosePath = Join-Path $env:LOCALAPPDATA "TailMsg\tailmsg-diagnose.txt"
+    if (-not (Test-Path -LiteralPath $diagnosePath)) {
+        throw "O diagnóstico Wine não produziu o relatório: $diagnosePath"
+    }
+    $diagnoseText = Get-Content -Raw -LiteralPath $diagnosePath
+    if ($diagnoseText -notmatch "Wine detectado:\s+SIM") {
+        Write-Status "[Wine] SKIP: o host atual não está executando sob Wine"
+        return
+    }
+
+    $peerMatch = [regex]::Match(
+        $diagnoseText,
+        "Peers Tailscale via 'tailscale status':\s*(\d+)")
+    if (-not $peerMatch.Success) {
+        throw "O diagnóstico Wine não informou a quantidade de peers Tailscale. Log: $diagnosePath"
+    }
+    $peerCount = [int]$peerMatch.Groups[1].Value
+    if ($peerCount -le 0) {
+        throw "O diagnóstico Wine não encontrou peers Tailscale. Log: $diagnosePath"
+    }
+    if ($diagnoseText -notmatch "Tentativa Wine:") {
+        throw "O diagnóstico Wine não informou a rota de helper usada. Log: $diagnosePath"
+    }
+    Write-Status "[Wine] PASS"
 }
 
 function New-SmokePackage([string]$PackagePath, [string]$Version) {
@@ -163,6 +205,25 @@ function Assert-JournalState([string]$JournalPath, [string]$State) {
     }
 }
 
+function Assert-JournalOrder(
+    [string]$JournalPath,
+    [string]$EarlierState,
+    [string]$LaterState) {
+    if (-not (Test-Path -LiteralPath $JournalPath)) {
+        throw "Journal não encontrado: $JournalPath"
+    }
+    $states = @(Get-Content -LiteralPath $JournalPath | ForEach-Object {
+        $match = [regex]::Match($_, '(^|;)state=([^;]*)')
+        if ($match.Success) { $match.Groups[2].Value }
+    })
+    $earlierIndex = [Array]::IndexOf($states, $EarlierState)
+    $laterIndex = [Array]::IndexOf($states, $LaterState)
+    if ($earlierIndex -lt 0 -or $laterIndex -lt 0 -or
+        $earlierIndex -ge $laterIndex) {
+        throw "Journal não preserva a ordem esperada: $EarlierState -> $LaterState"
+    }
+}
+
 function Run-UpdateScenario {
     Write-Status "[Update] pacote full, confirmação e rollback"
     New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
@@ -199,8 +260,11 @@ function Run-UpdateScenario {
     try {
         Invoke-Updater $packagePath $successTarget $successOperation $version -Isolated
         $successJournal = Get-JournalPath $successOperation
+        Assert-JournalState $successJournal "app-started"
         Assert-JournalState $successJournal "app-confirmed"
         Assert-JournalState $successJournal "completed"
+        Assert-JournalOrder $successJournal "app-started" "app-confirmed"
+        Assert-JournalOrder $successJournal "app-confirmed" "completed"
     }
     finally {
         Stop-TestApplication $successTarget
@@ -222,6 +286,9 @@ try {
     }
     if ($Scenario -eq "Update" -or $Scenario -eq "All") {
         Run-UpdateScenario
+    }
+    if ($Scenario -eq "Wine" -or $Scenario -eq "All") {
+        Run-WineScenario
     }
     Write-Status "PASS: smoke test $Scenario"
     exit 0

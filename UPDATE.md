@@ -23,7 +23,7 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 ## 0.1 Contexto essencial
 
 - **Repositório**: `D:\Projetos\TailMsg` (Windows; o terminal é bash/MSYS; os scripts de release são PowerShell — rodar com `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...`).
-- **Versão nova**: a versão atual está em `UpdateConfig.cs` → `CurrentVersion`. A nova versão é a PRÓXIMA no formato `YYYYMMDD_NNN` (mesma data, número seguinte; ex.: se está `20260823_001`, gere `20260823_002`).
+- **Versão nova**: a versão atual está em `UpdateConfig.cs` → `CurrentVersion`, mas a data da nova versão **NUNCA é herdada automaticamente da versão anterior**. O campo `YYYYMMDD` deve ser sempre a data local do dia em que o novo pacote está sendo gerado. No primeiro release daquele dia use `_001`; em releases adicionais no mesmo dia, use o próximo número livre (`_002`, `_003` etc.). Antes do bump, confira os pacotes locais e as releases/objetos publicados para não reutilizar uma versão. Exemplo obrigatório: se a última versão for `20260823_005` e o pacote for gerado em `2026-08-24`, a nova versão será `20260824_001`; uma segunda versão gerada em `2026-08-24` será `20260824_002`.
 - **Arquivos do projeto**:
   - `TailMsg.cs` — app principal (WinForms).
   - `TailMsgUpdate.cs` — cliente de atualização (consulta R2 + GitHub, valida, baixa e dispara o updater).
@@ -43,17 +43,18 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 ## 0.2 Regras obrigatórias (não negociáveis)
 
 1. **NUNCA sobrescrever um ZIP publicado** — cada versão é um arquivo `YYYYMMDD_NNN.zip` novo. O único arquivo atualizado no lugar é o manifesto `tailmsg-update.json` (permanente, aponta para a versão mais nova).
-2. **Bump do `CurrentVersion` em `UpdateConfig.cs` ANTES do package-release** (o script valida e falha se não corresponder).
-3. **`--package`/`-FileId` do manifesto = nome do arquivo no R2** (`YYYYMMDD_NNN.zip`), não um ID do Drive.
-4. **Publicar nos DOIS canais sempre**: R2 (ZIP + manifesto) E GitHub (ZIP + instalador + manifesto). O fallback só funciona se os dois estiverem íntegros.
-5. **Verificar o download público pelo R2.dev** (curl) e conferir SHA-256/tamanho contra o manifesto ANTES de anunciar.
-6. **Verificar o SHA-256 do asset da release do GitHub** contra o ZIP local (lição do SIG Android: nunca confiar em data/aparência do GitHub).
-7. **NUNCA commitar**: `update-private-key.xml`, `r2_config.json`, `dist/`, `release/packages/*.zip`, `release/generated/`, arquivos temporários de build.
-8. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
-9. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
-10. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
+2. **A data da versão é a data atual da geração** — nunca copie a data de `CurrentVersion` anterior. No primeiro release do dia, comece em `_001`; incremente somente para outro release do mesmo dia. Se a data ou o número já existir em qualquer canal, pare e escolha o próximo identificador livre.
+3. **Bump do `CurrentVersion` em `UpdateConfig.cs` ANTES do package-release** (o script valida e falha se não corresponder).
+4. **`--package`/`-FileId` do manifesto = nome do arquivo no R2** (`YYYYMMDD_NNN.zip`), não um ID do Drive.
+5. **Publicar nos DOIS canais sempre**: R2 (ZIP + manifesto) E GitHub (ZIP + instalador + manifesto). O fallback só funciona se os dois estiverem íntegros.
+6. **Verificar o download público pelo R2.dev** (curl) e conferir SHA-256/tamanho contra o manifesto ANTES de anunciar.
+7. **Verificar o SHA-256 do asset da release do GitHub** contra o ZIP local (lição do SIG Android: nunca confiar em data/aparência do GitHub).
+8. **NUNCA commitar**: `update-private-key.xml`, `r2_config.json`, `dist/`, `release/packages/*.zip`, `release/generated/`, arquivos temporários de build.
+9. Não inventar resultados nem números: tudo que for reportado deve vir da saída real dos comandos.
+10. Se QUALQUER etapa falhar: PARE imediatamente e reporte o erro exato (mensagem + o comando que falhou), sem tentar contornar por conta própria fora deste documento.
+11. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
 
-11. Antes de gerar pacote, execute o gate silencioso de validação:
+12. Antes de gerar pacote, execute o gate silencioso de validação:
     `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-smoke.ps1 -Scenario All -Quiet`.
     O gate deve validar build, protocolo, integração UDP/TCP, ACK e o journal do updater.
 
@@ -70,10 +71,20 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 
 ## 2. Bump da versão
 
+1. Descubra a data local atual no formato `YYYYMMDD`. Essa será obrigatoriamente a
+   parte inicial da versão nova.
+2. Liste os identificadores já usados nessa mesma data em `release/packages/`, nas
+   releases do GitHub e nos objetos publicados no R2. Se não houver nenhum, use
+   `_001`; caso já existam, use o próximo número sequencial livre.
+3. Nunca mantenha a data da versão anterior apenas porque o número sequencial
+   ainda não foi esgotado. A virada do calendário reinicia a sequência em `_001`.
+4. Se o identificador escolhido já existir em qualquer canal, pare sem sobrescrever
+   nada e escolha o próximo identificador livre.
+
 Editar `UpdateConfig.cs`:
 
 ```csharp
-public const string CurrentVersion = "YYYYMMDD_NNN";   // ex.: 20260823_002
+public const string CurrentVersion = "YYYYMMDD_NNN";   // ex.: 20260824_001
 ```
 
 - Formato obrigatório: `\d{8}_\d{3}` (o `package-release.ps1` valida).

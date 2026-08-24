@@ -98,6 +98,24 @@ internal static class UpdateJournal
         return "";
     }
 
+    public static string ReadLastDetail(string operationId)
+    {
+        if (!IsSafeOperationId(operationId)) return "";
+        try
+        {
+            string path = GetPath(operationId);
+            if (!File.Exists(path)) return "";
+            string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+            for (int index = lines.Length - 1; index >= 0; index--)
+            {
+                if (!String.IsNullOrEmpty(ReadField(lines[index], "state")))
+                    return ReadField(lines[index], "detail");
+            }
+        }
+        catch { }
+        return "";
+    }
+
     public static bool WaitForState(
         string operationId,
         string expectedState,

@@ -121,6 +121,9 @@ namespace TailMsgUpdater
                         "worker-attached");
                 }
                 InstallTransaction transaction = null;
+                bool applicationWasRunning =
+                    IsProcessRunning(processId) ||
+                    HasTailMsgRunning(targetDirectory);
 
                 try
                 {
@@ -162,12 +165,7 @@ namespace TailMsgUpdater
                         ConfigureFirewallIfElevated(targetDirectory);
                     }
                     StartApplication(targetDirectory, operationId, expectedVersion, isolated);
-                    if (!UpdateJournal.WaitForState(operationId, "app-confirmed", 30000))
-                    {
-                        throw new InvalidOperationException(
-                            "A nova instância não confirmou a versão após o reinício. Estado: " +
-                            UpdateJournal.ReadLastState(operationId));
-                    }
+                    WaitForApplicationConfirmation(operationId);
                     if (!UpdateJournal.WriteState(
                         operationId,
                         "completed",
@@ -182,6 +180,7 @@ namespace TailMsgUpdater
                 }
                 catch (Exception exception)
                 {
+                    bool restartApplication = applicationWasRunning;
                     if (transaction != null)
                     {
                         try
@@ -197,6 +196,7 @@ namespace TailMsgUpdater
                         }
                         catch (Exception rollbackException)
                         {
+                            restartApplication = false;
                             UpdateJournal.WriteState(
                                 operationId,
                                 "rollback-failed",
@@ -204,6 +204,10 @@ namespace TailMsgUpdater
                                 targetDirectory,
                                 rollbackException.Message);
                         }
+                    }
+                    if (restartApplication)
+                    {
+                        TryRestartApplication(targetDirectory);
                     }
                     UpdateJournal.WriteState(
                         operationId,
@@ -263,6 +267,7 @@ namespace TailMsgUpdater
             }
 
             ValidateStandaloneTarget(targetDirectory);
+            bool applicationWasRunning = HasTailMsgRunning(targetDirectory);
             try
             {
                 CloseTailMsgInTarget(targetDirectory);
@@ -303,12 +308,7 @@ namespace TailMsgUpdater
                     ConfigureFirewallIfElevated(targetDirectory);
                 }
                 StartApplication(targetDirectory, operationId, expectedVersion, isolated);
-                if (!UpdateJournal.WaitForState(operationId, "app-confirmed", 30000))
-                {
-                    throw new InvalidOperationException(
-                        "A nova instância não confirmou a versão após o reinício. Estado: " +
-                        UpdateJournal.ReadLastState(operationId));
-                }
+                WaitForApplicationConfirmation(operationId);
                 if (!UpdateJournal.WriteState(
                     operationId,
                     "completed",
@@ -323,6 +323,7 @@ namespace TailMsgUpdater
             }
             catch (Exception exception)
             {
+                bool restartApplication = applicationWasRunning;
                 if (transaction != null)
                 {
                     try
@@ -338,6 +339,7 @@ namespace TailMsgUpdater
                     }
                     catch (Exception rollbackException)
                     {
+                        restartApplication = false;
                         UpdateJournal.WriteState(
                             operationId,
                             "rollback-failed",
@@ -345,6 +347,10 @@ namespace TailMsgUpdater
                             targetDirectory,
                             rollbackException.Message);
                     }
+                }
+                if (restartApplication)
+                {
+                    TryRestartApplication(targetDirectory);
                 }
                 UpdateJournal.WriteState(
                     operationId,
@@ -943,9 +949,81 @@ namespace TailMsgUpdater
             }
         }
 
+        private static bool IsProcessRunning(int processId)
+        {
+            try
+            {
+                using (Process process = Process.GetProcessById(processId))
+                {
+                    return !process.HasExited;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        private static void WaitForApplicationConfirmation(string operationId)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+            while (DateTime.UtcNow < deadline)
+            {
+                string state = UpdateJournal.ReadLastState(operationId);
+                if (String.Equals(
+                    state,
+                    "app-confirmed",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                if (String.Equals(
+                        state,
+                        "app-service-failed",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(
+                        state,
+                        "app-journal-failed",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(
+                        state,
+                        "app-version-mismatch",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    string detail = UpdateJournal.ReadLastDetail(operationId);
+                    throw new InvalidOperationException(
+                        "A nova instância não confirmou a versão após o reinício. " +
+                        "Estado: " + state +
+                        (String.IsNullOrEmpty(detail)
+                            ? ""
+                            : "; detalhe: " + detail));
+                }
+
+                Thread.Sleep(100);
+            }
+
+            throw new InvalidOperationException(
+                "A nova instância não confirmou a versão após o reinício. Estado: " +
+                UpdateJournal.ReadLastState(operationId));
+        }
+
+        private static void TryRestartApplication(string targetDirectory)
+        {
+            try
+            {
+                if (File.Exists(Path.Combine(targetDirectory, "TailMsg.exe")))
+                {
+                    StartApplication(targetDirectory, "", "", false);
+                }
+            }
+            catch { }
+        }
+
         private static void WaitForNetworkPorts()
         {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+            Exception lastError = null;
             while (DateTime.UtcNow < deadline)
             {
                 TcpListener tcpProbe = null;
@@ -953,12 +1031,25 @@ namespace TailMsgUpdater
                 try
                 {
                     tcpProbe = new TcpListener(IPAddress.Any, 38257);
+                    try
+                    {
+                        tcpProbe.Server.ExclusiveAddressUse = true;
+                    }
+                    catch { }
                     tcpProbe.Start();
-                    udpProbe = new UdpClient(38258);
+                    udpProbe = new UdpClient(AddressFamily.InterNetwork);
+                    try
+                    {
+                        udpProbe.Client.ExclusiveAddressUse = true;
+                    }
+                    catch { }
+                    udpProbe.Client.Bind(
+                        new IPEndPoint(IPAddress.Any, 38258));
                     return;
                 }
-                catch (SocketException)
+                catch (Exception exception)
                 {
+                    lastError = exception;
                     Thread.Sleep(150);
                 }
                 finally
@@ -967,6 +1058,10 @@ namespace TailMsgUpdater
                     try { if (udpProbe != null) udpProbe.Close(); } catch { }
                 }
             }
+
+            throw new TimeoutException(
+                "As portas TCP 38257 e UDP 38258 não foram liberadas em 30 segundos." +
+                (lastError == null ? "" : " Último erro: " + lastError.Message));
         }
 
         private static InstallTransaction InstallPackage(

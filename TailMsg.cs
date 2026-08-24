@@ -1326,6 +1326,7 @@ namespace TailMsg
                 string serviceDetail = disableNetwork
                     ? "network-disabled-test"
                     : "";
+                bool showServiceError = false;
                 if (!disableNetwork)
                 {
                     try
@@ -1338,9 +1339,9 @@ namespace TailMsg
                     catch (Exception exception)
                     {
                         serviceDetail = exception.Message;
+                        showServiceError = true;
                         statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
                         statusLabel.Text = "Não foi possível iniciar o serviço.";
-                        MessageBox.Show(this, exception.Message, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 }
                 else
@@ -1360,6 +1361,20 @@ namespace TailMsg
                         BeginInvoke((MethodInvoker)delegate { Close(); });
                         return;
                     }
+                }
+
+                // Durante uma atualização, o updater precisa receber o estado
+                // app-service-failed antes de qualquer caixa modal. Caso
+                // contrário, a janela bloqueia o evento Shown e o updater só
+                // enxerga app-started até estourar o timeout.
+                if (showServiceError && updateStartup == null)
+                {
+                    MessageBox.Show(
+                        this,
+                        serviceDetail,
+                        "TailMsg",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
                 }
 
                 if (!disableNetwork && (updateStartup == null || serviceReady))
@@ -2526,9 +2541,29 @@ namespace TailMsg
                 try
                 {
                     tcpListener = new TcpListener(IPAddress.Any, tcpPort);
+                    try
+                    {
+                        tcpListener.Server.ExclusiveAddressUse = true;
+                    }
+                    catch
+                    {
+                        // Mantém compatibilidade com ambientes Wine/Mono que
+                        // não expõem essa opção no socket.
+                    }
                     tcpListener.Start();
 
-                    udpClient = new UdpClient(discoveryPort);
+                    udpClient = new UdpClient(AddressFamily.InterNetwork);
+                    try
+                    {
+                        udpClient.Client.ExclusiveAddressUse = true;
+                    }
+                    catch
+                    {
+                        // Alguns ambientes Wine/Mono podem não expor essa
+                        // opção; o bind abaixo continua sendo obrigatório.
+                    }
+                    udpClient.Client.Bind(
+                        new IPEndPoint(IPAddress.Any, discoveryPort));
                     udpClient.EnableBroadcast = true;
 
                     // Participa do grupo de multicast de descoberta para

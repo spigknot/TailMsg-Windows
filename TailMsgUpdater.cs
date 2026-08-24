@@ -28,6 +28,7 @@ namespace TailMsgUpdater
         private const int MaximumReleaseResponseBytes = 2 * 1024 * 1024;
         private const int MaximumZipEntries = 1000;
         private const long MaximumZipBytes = 512L * 1024L * 1024L;
+        private const int NetworkPortGracePeriodMilliseconds = 1000;
 
         private sealed class FullRelease
         {
@@ -1022,8 +1023,12 @@ namespace TailMsgUpdater
 
         private static void WaitForNetworkPorts()
         {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(30);
-            Exception lastError = null;
+            // A liberação tardia das portas não deve bloquear a atualização.
+            // O novo TailMsg confirma a inicialização antes do bind e possui
+            // seu próprio retry; o updater só precisa dar uma pequena janela
+            // para o encerramento normal da instância anterior.
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(
+                NetworkPortGracePeriodMilliseconds);
             while (DateTime.UtcNow < deadline)
             {
                 TcpListener tcpProbe = null;
@@ -1037,9 +1042,8 @@ namespace TailMsgUpdater
                         new IPEndPoint(IPAddress.Any, 38258));
                     return;
                 }
-                catch (Exception exception)
+                catch (Exception)
                 {
-                    lastError = exception;
                     Thread.Sleep(150);
                 }
                 finally
@@ -1048,10 +1052,6 @@ namespace TailMsgUpdater
                     try { if (udpProbe != null) udpProbe.Close(); } catch { }
                 }
             }
-
-            throw new TimeoutException(
-                "As portas TCP 38257 e UDP 38258 não foram liberadas em 30 segundos." +
-                (lastError == null ? "" : " Último erro: " + lastError.Message));
         }
 
         private static InstallTransaction InstallPackage(

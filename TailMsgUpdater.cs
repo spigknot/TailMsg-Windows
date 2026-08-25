@@ -1461,7 +1461,12 @@ namespace TailMsgUpdater
                 "TailMsg.exe");
             ProcessStartInfo info = new ProcessStartInfo();
             info.FileName = applicationPath;
-            info.Arguments = "--background";
+            // Uma atualização real deve devolver a janela ao usuário. O
+            // modo oculto continua reservado ao início automático, ao
+            // rollback e aos cenários isolados do smoke test.
+            bool startInBackground =
+                String.IsNullOrEmpty(operationId) || isolated;
+            info.Arguments = startInBackground ? "--background" : "";
             if (!String.IsNullOrEmpty(operationId))
             {
                 info.Arguments +=

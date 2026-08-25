@@ -28,6 +28,7 @@ namespace TailMsgUpdater
         private const int MaximumZipEntries = 1000;
         private const long MaximumZipBytes = 512L * 1024L * 1024L;
         private const int NetworkPortGracePeriodMilliseconds = 1000;
+        private const int ApplicationConfirmationTimeoutSeconds = 75;
 
         private sealed class FullRelease
         {
@@ -976,7 +977,8 @@ namespace TailMsgUpdater
 
         private static void WaitForApplicationConfirmation(string operationId)
         {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(30);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(
+                ApplicationConfirmationTimeoutSeconds);
             while (DateTime.UtcNow < deadline)
             {
                 if (UpdateJournal.HasStateAfter(

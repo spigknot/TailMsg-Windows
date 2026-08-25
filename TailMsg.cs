@@ -1392,7 +1392,16 @@ namespace TailMsg
                     Program.ReleaseUpdateHandoff(updateStartup);
                 }
 
-                if (forceServiceFailure)
+                bool serviceStartPending =
+                    !disableNetwork &&
+                    !forceServiceFailure;
+
+                if (serviceStartPending)
+                {
+                    statusLabel.Text = "Iniciando o serviço de rede...";
+                    StartNetworkServiceAsync(updateStartup != null);
+                }
+                else if (forceServiceFailure)
                 {
                     serviceReady = false;
                     serviceDetail = "simulated-service-failure";
@@ -1422,7 +1431,7 @@ namespace TailMsg
                     statusLabel.Text = "Modo de validação: rede desativada.";
                 }
 
-                if (updateStartup != null)
+                if (updateStartup != null && !serviceStartPending)
                 {
                     Program.CompleteUpdateStartup(
                         updateStartup,
@@ -1460,7 +1469,9 @@ namespace TailMsg
                         MessageBoxIcon.Error);
                 }
 
-                if (!disableNetwork && (updateStartup == null || serviceReady))
+                if (!disableNetwork &&
+                    !serviceStartPending &&
+                    (updateStartup == null || serviceReady))
                 {
                     RefreshComputers();
                     discoveryTimer.Start();
@@ -1484,6 +1495,60 @@ namespace TailMsg
                     messageBox.Focus();
                 }
             };
+        }
+
+        private void StartNetworkServiceAsync(bool extendedRetry)
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool serviceReady = false;
+                string serviceDetail = "";
+                try
+                {
+                    if (extendedRetry)
+                        networkService.StartForUpdate();
+                    else
+                        networkService.Start();
+                    serviceReady = true;
+                    serviceDetail = "network-service-ready";
+                }
+                catch (Exception exception)
+                {
+                    serviceDetail = exception.Message;
+                }
+
+                TryBeginInvoke(delegate
+                {
+                    if (IsDisposed) return;
+
+                    bool updateConfirmed = updateStartup == null ||
+                        Program.CompleteUpdateStartup(
+                            updateStartup,
+                            serviceReady,
+                            serviceDetail);
+                    if (serviceReady && updateConfirmed)
+                    {
+                        statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
+                        statusLabel.Text = "Serviço ativo. Procurando TailMsg na rede...";
+                        RefreshComputers();
+                        discoveryTimer.Start();
+                        CheckForUpdates(false);
+                        return;
+                    }
+
+                    statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                    statusLabel.Text = "Não foi possível iniciar o serviço.";
+                    if (updateStartup == null)
+                    {
+                        MessageBox.Show(
+                            this,
+                            serviceDetail,
+                            "TailMsg",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Error);
+                    }
+                });
+            });
         }
 
         private void OpenAbout()
@@ -1783,7 +1848,7 @@ namespace TailMsg
             {
                 try
                 {
-                    List<PeerInfo> computers = networkService.Discover(2200);
+                    List<PeerInfo> computers = networkService.Discover(900);
                     TryBeginInvoke(delegate
                     {
                         latestPeers = computers;
@@ -2580,6 +2645,8 @@ namespace TailMsg
         private TcpListener tcpListener;
         private UdpClient udpClient;
         private volatile bool running;
+        private const int NormalStartAttempts = 100;
+        private const int UpdateStartAttempts = 240;
 
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
 
@@ -2622,32 +2689,37 @@ namespace TailMsg
 
         public void Start()
         {
+            StartCore(NormalStartAttempts);
+        }
+
+        internal void StartForUpdate()
+        {
+            StartCore(UpdateStartAttempts);
+        }
+
+        private void StartCore(int maximumAttempts)
+        {
             if (running)
             {
                 return;
             }
 
             Exception lastError = null;
-            // O updater legado podia prosseguir depois de 15 segundos mesmo
-            // quando o socket anterior ainda estava registrado. O updater
-            // atual aguarda a mesma ordem de grandeza; manter 25 segundos
-            // de tentativas permite que a nova instância sobreviva a esse
-            // handoff sem alterar as portas de produção.
-            for (int attempt = 0; attempt < 100 && !running; attempt++)
+            // A troca de processo pode deixar um socket antigo em liberação
+            // por alguns segundos. A abertura normal conserva a espera
+            // histórica; o caminho de atualização usa uma janela maior, mas
+            // é executado fora da thread da interface.
+            for (int attempt = 0; attempt < maximumAttempts && !running; attempt++)
             {
                 try
                 {
                     tcpListener = new TcpListener(IPAddress.Any, tcpPort);
                     tcpListener.Start();
 
-                    // O construtor UdpClient(port) aplica uma política de
-                    // exclusividade que pode rejeitar a troca de processo
-                    // enquanto o registro UDP anterior ainda está sendo
-                    // liberado. O bind explícito mantém a compatibilidade
-                    // com Windows e Wine durante esse handoff.
-                    udpClient = new UdpClient(AddressFamily.InterNetwork);
-                    udpClient.Client.Bind(
-                        new IPEndPoint(IPAddress.Any, discoveryPort));
+                    // Use o construtor original do TailMsg para preservar a
+                    // política de bind que já funcionava no Windows e no
+                    // Wine durante a troca de processo.
+                    udpClient = new UdpClient(discoveryPort);
                     udpClient.EnableBroadcast = true;
 
                     // Participa do grupo de multicast de descoberta para

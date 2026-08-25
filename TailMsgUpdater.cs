@@ -80,6 +80,18 @@ namespace TailMsgUpdater
                     return;
                 }
 
+                // Versões antigas do TailMsg iniciam o updater enquanto ainda
+                // mantêm os sockets de produção abertos. Relançar por
+                // ShellExecute antes de aguardar o processo antigo cria um
+                // worker sem handles herdados e mantém a compatibilidade com
+                // clientes que ainda não possuem o callback de handoff.
+                if (options.ContainsKey("--pid") &&
+                    !IsTrue(options, "--handoff-child"))
+                {
+                    LaunchDetachedHandoff(args);
+                    return;
+                }
+
                 string zipPath = Require(options, "--zip");
                 string targetDirectory = Path.GetFullPath(
                     Require(options, "--target"));
@@ -939,6 +951,25 @@ namespace TailMsgUpdater
         private static string Quote(string value)
         {
             return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
+        }
+
+        private static void LaunchDetachedHandoff(string[] args)
+        {
+            StringBuilder arguments = new StringBuilder();
+            foreach (string argument in args ?? new string[0])
+            {
+                if (arguments.Length > 0) arguments.Append(" ");
+                arguments.Append(Quote(argument));
+            }
+            arguments.Append(" --handoff-child true");
+
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = Application.ExecutablePath;
+            info.Arguments = arguments.ToString();
+            info.WorkingDirectory = Path.GetDirectoryName(Application.ExecutablePath);
+            info.UseShellExecute = true;
+            info.WindowStyle = ProcessWindowStyle.Hidden;
+            Process.Start(info);
         }
 
         private static void WaitForApplication(int processId)

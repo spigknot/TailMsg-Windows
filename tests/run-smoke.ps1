@@ -115,6 +115,35 @@ function Invoke-Executable(
     return $process.ExitCode
 }
 
+function Invoke-DetachedExecutable(
+    [string]$Path,
+    [string]$Arguments,
+    [int]$TimeoutMilliseconds = 3000) {
+    try {
+        $process = Start-Process -FilePath $Path `
+            -ArgumentList $Arguments `
+            -WorkingDirectory $projectDirectory `
+            -PassThru -WindowStyle Hidden
+    }
+    catch {
+        throw ("Não foi possível iniciar o comando desprendido: {0} {1}. erro={2}" -f
+            $Path, $Arguments, $_.Exception.Message)
+    }
+
+    try {
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            throw "O processo pai não encerrou no tempo esperado."
+        }
+        if ($process.ExitCode -ne 0) {
+            throw ("Comando desprendido falhou ({0}): {1} {2}" -f
+                $process.ExitCode, $Path, $Arguments)
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Quote-Argument([string]$Value) {
     return '"' + ($Value.Replace('"', '\"')) + '"'
 }
@@ -289,6 +318,33 @@ function Assert-JournalState([string]$JournalPath, [string]$State) {
     }
 }
 
+function Assert-JournalDetail([string]$JournalPath, [string]$Detail) {
+    if (-not (Test-Path -LiteralPath $JournalPath)) {
+        throw "Journal não encontrado: $JournalPath"
+    }
+    $text = Get-Content -Raw -LiteralPath $JournalPath
+    if ($text -notmatch ("detail=" + [regex]::Escape($Detail))) {
+        throw "Journal não contém detail=${Detail}: $JournalPath"
+    }
+}
+
+function Wait-JournalState(
+    [string]$JournalPath,
+    [string]$State,
+    [int]$TimeoutSeconds = 15) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $JournalPath) {
+            $text = Get-Content -Raw -LiteralPath $JournalPath
+            if ($text -match ("state=" + [regex]::Escape($State))) {
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-JournalState $JournalPath $State
+}
+
 function Assert-JournalOrder(
     [string]$JournalPath,
     [string]$EarlierState,
@@ -328,6 +384,32 @@ function Run-UpdateScenario {
     Assert-JournalState $testOnlyJournal "test-only-completed"
     if (-not (Test-Path -LiteralPath (Join-Path $testOnlyTarget "TailMsg.exe"))) {
         throw "O modo test-only não instalou TailMsg.exe."
+    }
+
+    $handoffTarget = Join-Path $testRoot "handoff"
+    $handoffOperation = [Guid]::NewGuid().ToString("N")
+    New-Item -ItemType Directory -Path $handoffTarget -Force | Out-Null
+    $handoffProcess = Start-Process -FilePath "powershell.exe" `
+        -ArgumentList @("-NoProfile", "-Command", "Start-Sleep -Seconds 5") `
+        -WindowStyle Hidden -PassThru
+    try {
+        $handoffArguments =
+            "--zip " + (Quote-Argument $packagePath) +
+            " --target " + (Quote-Argument $handoffTarget) +
+            " --pid " + $handoffProcess.Id +
+            " --operation-id " + (Quote-Argument $handoffOperation) +
+            " --expected-version " + (Quote-Argument $version) +
+            " --test-only true --quiet true"
+        Invoke-DetachedExecutable $updaterPath $handoffArguments
+        $handoffJournal = Get-JournalPath $handoffOperation
+        Wait-JournalState $handoffJournal "test-only-completed"
+        Assert-JournalDetail $handoffJournal "worker-attached"
+    }
+    finally {
+        if (-not $handoffProcess.HasExited) {
+            Stop-Process -Id $handoffProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        $handoffProcess.Dispose()
     }
 
     $rollbackTarget = Join-Path $testRoot "rollback"

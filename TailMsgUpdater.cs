@@ -5,7 +5,6 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
-using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Reflection;
@@ -1033,35 +1032,14 @@ namespace TailMsgUpdater
 
         private static void WaitForNetworkPorts()
         {
-            // A liberação tardia das portas não deve bloquear a atualização.
-            // O novo TailMsg confirma a inicialização antes do bind e possui
-            // seu próprio retry; o updater só precisa dar uma pequena janela
-            // para o encerramento normal da instância anterior.
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(
-                NetworkPortGracePeriodMilliseconds);
-            while (DateTime.UtcNow < deadline)
-            {
-                TcpListener tcpProbe = null;
-                UdpClient udpProbe = null;
-                try
-                {
-                    tcpProbe = new TcpListener(IPAddress.Any, 38257);
-                    tcpProbe.Start();
-                    udpProbe = new UdpClient(AddressFamily.InterNetwork);
-                    udpProbe.Client.Bind(
-                        new IPEndPoint(IPAddress.Any, 38258));
-                    return;
-                }
-                catch (Exception)
-                {
-                    Thread.Sleep(150);
-                }
-                finally
-                {
-                    try { if (tcpProbe != null) tcpProbe.Stop(); } catch { }
-                    try { if (udpProbe != null) udpProbe.Close(); } catch { }
-                }
-            }
+            // Não abra as portas de produção para fazer uma sonda. Fechar um
+            // probe TCP/UDP e iniciar imediatamente a nova instância pode
+            // deixar o registro do socket em transição e causar o erro 10048.
+            // O processo anterior já foi aguardado; apenas damos uma pequena
+            // janela para o Windows concluir a liberação. O bind real fica
+            // exclusivamente no NetworkService da nova instância, que possui
+            // retry próprio e preserva a compatibilidade com Wine.
+            Thread.Sleep(NetworkPortGracePeriodMilliseconds);
         }
 
         private static InstallTransaction InstallPackage(

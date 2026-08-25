@@ -80,7 +80,9 @@ namespace TailMsg
                 return;
             }
 
-            bool startHidden = HasArgument(args, "--background");
+            bool startHidden = HasArgument(args, "--background") &&
+                (updateStartup == null ||
+                 HasArgument(args, "--test-exit-after-confirm"));
             bool disableNetwork = HasArgument(args, "--test-no-network");
             string testInstance = GetArgumentValue(args, "--test-instance");
             string mutexName = String.IsNullOrEmpty(testInstance)

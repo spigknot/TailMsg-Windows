@@ -1796,6 +1796,13 @@ namespace TailMsg
                 },
                 delegate
                 {
+                    // Feche os sockets antes de criar o updater. Assim, o
+                    // helper não recebe handles das portas de produção no
+                    // handoff, mesmo em ambientes que os herdem.
+                    networkService.Stop();
+                },
+                delegate
+                {
                     if (IsDisposed) return;
                     try
                     {
@@ -1819,6 +1826,7 @@ namespace TailMsg
                             updateInProgress = false;
                             updateButton.Enabled = true;
                             updateButton.Text = "Atualização disponível";
+                            StartNetworkServiceAsync(false);
                             MessageBox.Show(
                                 this,
                                 "Não foi possível atualizar o TailMsg.\r\n\r\n" +

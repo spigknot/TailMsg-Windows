@@ -101,6 +101,7 @@ namespace TailMsg
         public static void DownloadAndInstallAsync(
             UpdateManifest manifest,
             Action downloaded,
+            Action prepareToStart,
             Action readyToClose,
             Action<string> failed)
         {
@@ -167,6 +168,7 @@ namespace TailMsg
                         " --expected-version " + Quote(manifest.Version);
                     info.UseShellExecute = false;
                     info.CreateNoWindow = true;
+                    if (prepareToStart != null) prepareToStart();
                     Process.Start(info);
 
                     UpdateJournal.WriteState(

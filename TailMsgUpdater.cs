@@ -165,7 +165,12 @@ namespace TailMsgUpdater
                         ConfigureUser(targetDirectory);
                         ConfigureFirewallIfElevated(targetDirectory);
                     }
-                    StartApplication(targetDirectory, operationId, expectedVersion, isolated);
+                    StartApplication(
+                        targetDirectory,
+                        operationId,
+                        expectedVersion,
+                        isolated,
+                        IsTrue(options, "--simulate-service-failure"));
                     WaitForApplicationConfirmation(operationId);
                     if (!UpdateJournal.WriteState(
                         operationId,
@@ -308,7 +313,12 @@ namespace TailMsgUpdater
                     ConfigureUser(targetDirectory);
                     ConfigureFirewallIfElevated(targetDirectory);
                 }
-                StartApplication(targetDirectory, operationId, expectedVersion, isolated);
+                StartApplication(
+                    targetDirectory,
+                    operationId,
+                    expectedVersion,
+                    isolated,
+                    IsTrue(options, "--simulate-service-failure"));
                 WaitForApplicationConfirmation(operationId);
                 if (!UpdateJournal.WriteState(
                     operationId,
@@ -970,15 +980,15 @@ namespace TailMsgUpdater
             DateTime deadline = DateTime.UtcNow.AddSeconds(30);
             while (DateTime.UtcNow < deadline)
             {
-                string state = UpdateJournal.ReadLastState(operationId);
-                if (String.Equals(
-                    state,
-                    "app-confirmed",
-                    StringComparison.OrdinalIgnoreCase))
+                if (UpdateJournal.HasStateAfter(
+                    operationId,
+                    "service-ready",
+                    "app-confirmed"))
                 {
                     return;
                 }
 
+                string state = UpdateJournal.ReadLastState(operationId);
                 if (String.Equals(
                         state,
                         "app-service-failed",
@@ -994,7 +1004,7 @@ namespace TailMsgUpdater
                 {
                     string detail = UpdateJournal.ReadLastDetail(operationId);
                     throw new InvalidOperationException(
-                        "A nova instância não confirmou a versão após o reinício. " +
+                        "A nova instância não confirmou o serviço após o reinício. " +
                         "Estado: " + state +
                         (String.IsNullOrEmpty(detail)
                             ? ""
@@ -1005,7 +1015,7 @@ namespace TailMsgUpdater
             }
 
             throw new InvalidOperationException(
-                "A nova instância não confirmou a versão após o reinício. Estado: " +
+                "A nova instância não confirmou o serviço após o reinício. Estado: " +
                 UpdateJournal.ReadLastState(operationId));
         }
 
@@ -1015,7 +1025,7 @@ namespace TailMsgUpdater
             {
                 if (File.Exists(Path.Combine(targetDirectory, "TailMsg.exe")))
                 {
-                    StartApplication(targetDirectory, "", "", false);
+                    StartApplication(targetDirectory, "", "", false, false);
                 }
             }
             catch { }
@@ -1240,7 +1250,7 @@ namespace TailMsgUpdater
                 }
                 try
                 {
-                    if (File.Exists(destination)) File.Delete(destination);
+                    DeleteWithRetry(destination);
                 }
                 catch (Exception exception)
                 {
@@ -1288,6 +1298,29 @@ namespace TailMsgUpdater
                     Directory.Delete(transaction.BackupDirectory, true);
             }
             catch { }
+        }
+
+        private static void DeleteWithRetry(string path)
+        {
+            Exception lastError = null;
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                try
+                {
+                    if (!File.Exists(path)) return;
+                    File.Delete(path);
+                    if (!File.Exists(path)) return;
+                }
+                catch (Exception exception)
+                {
+                    lastError = exception;
+                }
+                Thread.Sleep(250);
+            }
+
+            throw new IOException(
+                "Não foi possível remover arquivo durante o rollback.",
+                lastError);
         }
 
         private static void ExtractSafely(
@@ -1454,7 +1487,8 @@ namespace TailMsgUpdater
             string targetDirectory,
             string operationId,
             string expectedVersion,
-            bool isolated)
+            bool isolated,
+            bool simulateServiceFailure)
         {
             string applicationPath = Path.Combine(
                 targetDirectory,
@@ -1478,6 +1512,10 @@ namespace TailMsgUpdater
                         " --test-instance " + Quote(operationId) +
                         " --test-no-network" +
                         " --test-exit-after-confirm";
+                }
+                if (simulateServiceFailure)
+                {
+                    info.Arguments += " --test-force-service-failure";
                 }
             }
             info.WorkingDirectory = targetDirectory;

@@ -105,7 +105,8 @@ namespace TailMsg
                     startHidden,
                     disableNetwork,
                     updateStartup,
-                    HasArgument(args, "--test-exit-after-confirm")));
+                    HasArgument(args, "--test-exit-after-confirm"),
+                    HasArgument(args, "--test-force-service-failure")));
             }
         }
 
@@ -188,6 +189,25 @@ namespace TailMsg
                 return false;
             }
 
+            bool serviceRecorded = UpdateJournal.WriteState(
+                updateStartup.OperationId,
+                "service-ready",
+                updateStartup.ExpectedVersion,
+                Application.StartupPath,
+                String.IsNullOrEmpty(detail)
+                    ? "network-service-ready"
+                    : detail);
+            if (!serviceRecorded)
+            {
+                UpdateJournal.WriteState(
+                    updateStartup.OperationId,
+                    "app-journal-failed",
+                    updateStartup.ExpectedVersion,
+                    Application.StartupPath,
+                    "service-ready-not-recorded");
+                return false;
+            }
+
             return UpdateJournal.WriteState(
                 updateStartup.OperationId,
                 "app-confirmed",
@@ -196,6 +216,34 @@ namespace TailMsg
                 String.IsNullOrEmpty(detail)
                     ? "service-ready"
                     : detail);
+        }
+
+        internal static bool ReleaseUpdateHandoff(
+            UpdateStartupInfo updateStartup)
+        {
+            if (updateStartup == null || !updateStartup.VersionMatches)
+                return false;
+            if (!updateStartup.AppStartedRecorded)
+            {
+                UpdateJournal.WriteState(
+                    updateStartup.OperationId,
+                    "app-journal-failed",
+                    updateStartup.ExpectedVersion,
+                    Application.StartupPath,
+                    "app-started-not-recorded");
+                return false;
+            }
+
+            // Compatibilidade com o updater antigo: este marcador libera
+            // sondas de porta antigas, mas não representa prontidão do
+            // serviço. O updater atual exige service-ready seguido de um
+            // app-confirmed posterior antes de concluir.
+            return UpdateJournal.WriteState(
+                updateStartup.OperationId,
+                "app-confirmed",
+                updateStartup.ExpectedVersion,
+                Application.StartupPath,
+                "legacy-handoff-released");
         }
 
         private static bool HasArgument(string[] args, string expected)
@@ -1037,6 +1085,7 @@ namespace TailMsg
         private readonly bool disableNetwork;
         private readonly UpdateStartupInfo updateStartup;
         private readonly bool exitAfterUpdateConfirmation;
+        private readonly bool forceServiceFailure;
         private AboutForm aboutForm;
         private readonly List<ReceivedMessageForm> receivedNotifications =
             new List<ReceivedMessageForm>();
@@ -1048,14 +1097,14 @@ namespace TailMsg
         private UpdateManifest availableUpdate;
 
         public MainForm(bool startInBackground)
-            : this(startInBackground, false, null, false)
+            : this(startInBackground, false, null, false, false)
         {
         }
 
         public MainForm(
             bool startInBackground,
             bool disableNetwork)
-            : this(startInBackground, disableNetwork, null, false)
+            : this(startInBackground, disableNetwork, null, false, false)
         {
         }
 
@@ -1063,12 +1112,14 @@ namespace TailMsg
             bool startInBackground,
             bool disableNetwork,
             UpdateStartupInfo updateStartup,
-            bool exitAfterUpdateConfirmation)
+            bool exitAfterUpdateConfirmation,
+            bool forceServiceFailure)
         {
             startHidden = startInBackground;
             this.disableNetwork = disableNetwork;
             this.updateStartup = updateStartup;
             this.exitAfterUpdateConfirmation = exitAfterUpdateConfirmation;
+            this.forceServiceFailure = forceServiceFailure;
             localComputerName = Environment.MachineName;
             networkService = new NetworkService(localComputerName);
             networkService.MessageReceived += NetworkServiceMessageReceived;
@@ -1329,22 +1380,27 @@ namespace TailMsg
                     ? "network-disabled-test"
                     : "";
                 bool showServiceError = false;
-                bool updateConfirmed = false;
 
                 // O updater legado pode manter sondas de porta abertas até
-                // receber app-confirmed. Confirmar o processo antes do bind
-                // de rede permite que ele termine e libere esses sockets;
-                // a inicialização do serviço continua sendo tentada logo
-                // abaixo e não altera o comportamento de uma abertura normal.
+                // receber app-confirmed. Liberar o handoff antes do bind
+                // permite que ele termine e libere esses sockets. Este
+                // marcador não confirma o update atual: depois do bind,
+                // CompleteUpdateStartup grava service-ready e um novo
+                // app-confirmed, que é a sequência exigida pelo updater atual.
                 if (updateStartup != null && updateStartup.VersionMatches)
                 {
-                    updateConfirmed = Program.CompleteUpdateStartup(
-                        updateStartup,
-                        true,
-                        "application-started");
+                    Program.ReleaseUpdateHandoff(updateStartup);
                 }
 
-                if (!disableNetwork)
+                if (forceServiceFailure)
+                {
+                    serviceReady = false;
+                    serviceDetail = "simulated-service-failure";
+                    showServiceError = true;
+                    statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                    statusLabel.Text = "Não foi possível iniciar o serviço.";
+                }
+                else if (!disableNetwork)
                 {
                     try
                     {
@@ -1366,7 +1422,7 @@ namespace TailMsg
                     statusLabel.Text = "Modo de validação: rede desativada.";
                 }
 
-                if (updateStartup != null && !updateConfirmed)
+                if (updateStartup != null)
                 {
                     Program.CompleteUpdateStartup(
                         updateStartup,
@@ -1377,7 +1433,17 @@ namespace TailMsg
                 if (updateStartup != null && exitAfterUpdateConfirmation)
                 {
                     allowExit = true;
-                    BeginInvoke((MethodInvoker)delegate { Close(); });
+                    if (forceServiceFailure)
+                    {
+                        // O cenário de falha precisa encerrar a instância
+                        // antes que o updater tente remover os arquivos para
+                        // o rollback; usar BeginInvoke aqui cria uma corrida.
+                        Close();
+                    }
+                    else
+                    {
+                        BeginInvoke((MethodInvoker)delegate { Close(); });
+                    }
                     return;
                 }
 
@@ -1725,7 +1791,7 @@ namespace TailMsg
                         PopulateComputers(visibleComputers);
                         int remoteCount = CountRemotePeers(visibleComputers);
                         statusLabel.Text = remoteCount == 0
-                            ? "Nenhum outro TailMsg respondeu."
+                            ? NetworkDiscovery.GetDiscoverySummary()
                             : "Pronto para enviar.";
                     });
                 }
@@ -3097,6 +3163,41 @@ namespace TailMsg
             return result;
         }
 
+        public static string GetDiscoverySummary()
+        {
+            List<NetworkEndpoint> endpoints = GetEndpoints();
+            if (endpoints.Count == 0)
+            {
+                return "Nenhuma interface 10.x/100.x elegível foi encontrada.";
+            }
+
+            if (WineEnvironment.IsWine)
+            {
+                string source = TailscaleDiscovery.LastSuccessSource;
+                if (!String.IsNullOrEmpty(source))
+                {
+                    return "Interfaces: " + endpoints.Count +
+                        ". Tailscale/Wine respondeu pela rota configurada.";
+                }
+
+                string attempt = TailscaleDiscovery.LastAttemptSummary;
+                if (String.IsNullOrEmpty(attempt))
+                {
+                    attempt = "rota do helper não informada";
+                }
+                attempt = attempt.Replace("\r", " ").Replace("\n", " ");
+                if (attempt.Length > 180)
+                {
+                    attempt = attempt.Substring(0, 180) + "...";
+                }
+                return "Interfaces: " + endpoints.Count +
+                    ". Tailscale/Wine: " + attempt;
+            }
+
+            return "Interfaces elegíveis: " + endpoints.Count +
+                ". Nenhum outro TailMsg respondeu.";
+        }
+
         private static IPAddress GetMask(UnicastIPAddressInformation unicast)
         {
             try
@@ -3603,7 +3704,7 @@ namespace TailMsg
                         int found = AddAddressesFromOutput(reader.ReadToEnd(), addresses);
                         if (found > 0)
                         {
-                            source = "Wine LocalAPI: " + url;
+                            source = "Wine LocalAPI";
                             return true;
                         }
                     }

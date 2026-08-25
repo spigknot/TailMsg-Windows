@@ -1,38 +1,46 @@
-# Invariantes do projeto TailMsg
+# TailMsg — regras permanentes
 
-## Escopo
+Este arquivo é o único prefixo estável carregado por padrão. Procedimentos
+detalhados pertencem aos documentos roteados abaixo.
+
+## Compatibilidade
 
 - Preservar Windows 7 32-bit, Windows 10/11 e execução sob Wine.
-- Manter a descoberta nas faixas 10.x.x.x e 100.64.0.0/10.
-- Preservar o protocolo de rede v1 e as portas de produção TCP 38257 e UDP 38258.
-- Não alterar autenticação ou criptografia de mensagens sem solicitação explícita.
+- Preservar descoberta nas faixas 10.x.x.x e 100.64.0.0/10.
+- Preservar protocolo de rede v1 e portas TCP 38257 / UDP 38258.
+- Não alterar autenticação ou criptografia sem solicitação explícita.
 
-## Build e validação
+## Segurança
 
-- O build oficial é `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`.
-- Antes de uma release, executar `TailMsg.exe --self-test`,
-  `TailMsg.exe --integration-self-test` e `tests\run-smoke.ps1 -Scenario All`.
-- `--self-test` valida protocolo e filtros; `--diagnose` valida o ambiente de rede.
-- O smoke test deve ser silencioso, não abrir janelas e retornar código de saída útil.
-- Após um clone novo, ativar os hooks com
-  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-hooks.ps1 -Quiet`.
-- Mudanças na descoberta Tailscale/Wine exigem uma execução de
-  `TailMsg.exe --diagnose` em um host Wine/Tailscale; ausência de helper ou peer
-  deve ser reportada como limitação ambiental.
-- Para o gate de whitespace, redirecionar `git diff --check` para manter a saída silenciosa;
-  não combinar `--quiet`, pois o Git pode tratá-lo como "há diff".
-- Mudanças no `.cs` ou no `build.ps1` precisam atualizar as listas de fontes do compilador.
+- Nunca registrar mensagens, API keys ou outros segredos.
+- Usar somente fixtures isoladas; nunca enviar mensagens reais na validação.
+- Não commitar credenciais, `dist/`, `build/`, pacotes, logs ou artefatos
+  temporários.
 
-## Atualizações
+## Roteamento progressivo
 
-- `UPDATE.md` é a fonte da verdade para pacote, manifesto, R2 e GitHub.
-- `UpdateConfig.CurrentVersion` é a única versão de produto; o updater deve compilá-la.
-- O updater só confirma sucesso depois que a nova instância inicia e grava o journal.
-- Nunca sobrescrever pacotes publicados nem commitar chaves, `r2_config.json`, `dist/`,
-  `release/packages/`, `release/generated/` ou artefatos temporários.
+- Mudança em `.cs`, `build.ps1`, `tests/`, updater, rede ou regras do harness:
+  leia `.agents/skills/tailmsg-validation/SKILL.md`.
+- Comandos, pré-requisitos, códigos de saída e diagnósticos:
+  leia `docs/agents/validation.md`.
+- Publicação de versão: leia `UPDATE.md` somente nessa tarefa.
+- Manutenção do prefixo/cache: leia `docs/agents/harness-prefix.md`.
+- Hooks/harness: use `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-hooks.ps1 -Quiet`;
+  o dispatcher chama `scripts/validate-agent-harness.ps1`; não copie o
+  procedimento para este arquivo.
 
-## Segurança operacional
+## Gate mínimo
 
-- Logs de diagnóstico não podem conter texto de mensagem, API keys ou segredos.
-- Não enviar mensagens reais durante smoke tests; usar endpoints isolados ou loopback.
-- Ao relatar uma validação, informar o comando e o resultado real.
+- Desenvolvimento: execute o cenário focado (`Network`, `Update` ou `Wine`).
+- Mudança no harness: execute `scripts\validate-agent-harness.ps1 -Quiet`.
+- Release: execute
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-release.ps1 -Quiet`.
+- No release em Windows nativo, a ausência de Wine é `NOT_APPLICABLE` e não
+  bloqueia o gate; isso não representa validação sob Wine. No cenário focado
+  `Wine`, ausência de Wine, helper ou peer remoto continua `UNVERIFIED`.
+- Relate o primeiro comando que falhar e preserve o diagnóstico.
+
+## Build
+
+- As listas de fontes C# ficam em `build.ps1`; atualize-as ao adicionar ou
+  remover qualquer arquivo `.cs`.

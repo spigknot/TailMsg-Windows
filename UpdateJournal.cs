@@ -1,11 +1,21 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 internal static class UpdateJournal
 {
     private static readonly object Sync = new object();
+    private static readonly Regex SensitiveFieldPattern = new Regex(
+        @"(?<key>\b(?:authorization|api[_-]?key|access[_-]?key|secret(?:[_-]?access)?[_-]?key|token|password|passwd)\b)\s*[:=]\s*(?:Bearer\s+)?[^\s;,\r\n]+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex QueryStringPattern = new Regex(
+        @"(?<url>https?://[^\s;?]+)\?[^\s;]+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex KnownTokenPattern = new Regex(
+        @"\b(?:cfat_|sk-|ghp_|github_pat_)[A-Za-z0-9_-]+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static string OperationsDirectory
     {
@@ -116,6 +126,50 @@ internal static class UpdateJournal
         return "";
     }
 
+    public static bool HasStateAfter(
+        string operationId,
+        string earlierState,
+        string laterState)
+    {
+        if (!IsSafeOperationId(operationId) ||
+            String.IsNullOrEmpty(earlierState) ||
+            String.IsNullOrEmpty(laterState))
+        {
+            return false;
+        }
+
+        try
+        {
+            string path = GetPath(operationId);
+            if (!File.Exists(path)) return false;
+
+            bool earlierSeen = false;
+            string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+            foreach (string line in lines)
+            {
+                string state = ReadField(line, "state");
+                if (String.Equals(
+                    state,
+                    earlierState,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    earlierSeen = true;
+                }
+                else if (earlierSeen &&
+                    String.Equals(
+                        state,
+                        laterState,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+        catch { }
+
+        return false;
+    }
+
     public static bool WaitForState(
         string operationId,
         string expectedState,
@@ -171,12 +225,21 @@ internal static class UpdateJournal
         return true;
     }
 
-    private static string Safe(string value)
+    public static string SanitizeForJournal(string value)
     {
-        return (value ?? "")
+        string safe = value ?? "";
+        safe = SensitiveFieldPattern.Replace(safe, "${key}=<REDACTED>");
+        safe = KnownTokenPattern.Replace(safe, "<REDACTED>");
+        safe = QueryStringPattern.Replace(safe, "${url}?<REDACTED>");
+        return safe
             .Replace("\r", " ")
             .Replace("\n", " ")
             .Replace(";", ",")
             .Replace("=", ":");
+    }
+
+    private static string Safe(string value)
+    {
+        return SanitizeForJournal(value);
     }
 }

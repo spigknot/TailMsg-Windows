@@ -7,6 +7,18 @@
 
 ---
 
+## 0.0 Limite de contexto
+
+Este é um documento **exclusivo de release**. Não o inclua no prefixo padrão
+do agente: data, versão, canal atual, histórico, estado do checkout, URLs de
+publicação e detalhes do ambiente são deliberadamente voláteis. Para tarefas
+comuns, use `AGENTS.md` e a skill de validação; carregue este documento apenas
+quando a tarefa envolver publicação.
+
+O contrato detalhado de validação pertence a
+`docs/agents/validation.md`. O contrato do prefixo estável e do capsule
+volátil pertence a `docs/agents/harness-prefix.md`.
+
 ## 0. Visão geral do fluxo
 
 ```
@@ -22,7 +34,11 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 
 ## 0.1 Contexto essencial
 
-- **Repositório**: `D:\Projetos\TailMsg` (Windows; o terminal é bash/MSYS; os scripts de release são PowerShell — rodar com `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...`).
+- **Repositório**: `D:\Projetos\TailMsg` (Windows). Os scripts de release são
+  PowerShell e devem ser executados com
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...`, mesmo quando o
+  terminal hospedeiro for Bash/MSYS. Os comandos Bash ficam restritos às
+  verificações Linux/Wine explicitamente marcadas.
 - **Versão nova**: a versão atual está em `UpdateConfig.cs` → `CurrentVersion`, mas a data da nova versão **NUNCA é herdada automaticamente da versão anterior**. O campo `YYYYMMDD` deve ser sempre a data local do dia em que o novo pacote está sendo gerado. No primeiro release daquele dia use `_001`; em releases adicionais no mesmo dia, use o próximo número livre (`_002`, `_003` etc.). Antes do bump, confira os pacotes locais e as releases/objetos publicados para não reutilizar uma versão. Exemplo obrigatório: se a última versão for `20260823_005` e o pacote for gerado em `2026-08-24`, a nova versão será `20260824_001`; uma segunda versão gerada em `2026-08-24` será `20260824_002`.
 - **Arquivos do projeto**:
   - `TailMsg.cs` — app principal (WinForms).
@@ -55,8 +71,13 @@ bump da versão → package-release (build + ZIP + instalador) → manifest assi
 11. Ao terminar, revise e atualize este documento se algo divergiu (seção 9 — Manutenção do documento).
 
 12. Antes de gerar pacote, execute o gate silencioso de validação:
-    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run-smoke.ps1 -Scenario All -Quiet`.
-    O gate deve validar build, protocolo, integração UDP/TCP, ACK e o journal do updater.
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-release.ps1 -Quiet`.
+    O wrapper também verifica o prefixo estável, chama o cenário `All` do
+    smoke test e executa o gate de whitespace. Em Windows nativo, a subetapa
+    Wine pode resultar em `NOT_APPLICABLE`, sem alegar que Wine foi validado;
+    `UNVERIFIED` continua bloqueando quando o cenário focado Wine ou um host
+    Wine real não consegue validar helper/peers. O contrato detalhado está em
+    `docs/agents/validation.md`.
 
 ## 1. Pré-requisitos (antes de começar)
 
@@ -214,7 +235,7 @@ a fonte da verdade e deve evoluir com a prática.
 | ZIP publicado no R2 com SHA divergente do manifesto | subiu arquivo errado (ex.: rezip local) | SEMPRE usar o ZIP de `release/packages/` gerado pelo `package-release.ps1`; conferir SHA antes do upload |
 | Atualização demora cerca de 15–20 s antes de abrir | o updater aguardava as portas antigas por até 30 s, embora o novo app já possua retry próprio de bind | limitar a espera do updater a 1 s; depois disso, instalar e deixar o `NetworkService` do novo app concluir a liberação com retry |
 | Nova versão inicia minimizada após a atualização | o updater antigo sempre passava `--background` ao reiniciar o executável | passar `--background` somente no início automático, rollback e testes isolados; o app também ignora esse argumento durante uma atualização real para manter compatibilidade com updaters antigos |
-| Nova instância falha com erro de endereço de soquete durante a atualização | o updater legado iniciou o pacote enquanto os sockets da instância anterior ainda estavam sendo liberados e aguardava `app-confirmed` enquanto mantinha sondas abertas | confirmar o processo antes do bind durante a atualização, manter o encerramento explícito do `NetworkService`, o retry de inicialização de 25 s e fazer o cliente extrair o `TailMsgUpdater.exe` do ZIP validado |
+| Nova instância falha com erro de endereço de soquete durante a atualização | o updater legado iniciou o pacote enquanto os sockets da instância anterior ainda estavam sendo liberados e aguardava `app-confirmed` enquanto mantinha sondas abertas | manter o marcador antecipado somente como handoff legado; o updater atual deve exigir `service-ready` seguido de `app-confirmed`; preservar o encerramento explícito do `NetworkService`, o retry de inicialização de 25 s e fazer o cliente extrair o `TailMsgUpdater.exe` do ZIP validado |
 
 ---
 

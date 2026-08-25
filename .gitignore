@@ -10,6 +10,7 @@ dist-wine-fix/
 downloads/
 build-validation/
 build-validation-manual/
+.codex/
 linux/
 *.exe
 *.log

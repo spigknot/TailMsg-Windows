@@ -1,0 +1,38 @@
+name: TailMsg validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-validation:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run full validation gate
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\scripts\validate-agent-harness.ps1 `
+            -Full -SkipWine -Quiet -Json `
+            -EvidencePath .\build-validation\ci-validation.json `
+            -DiagnosticsPath .\build-validation\ci-diagnostics
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload compact validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailmsg-validation-evidence
+          path: build-validation/**
+          if-no-files-found: ignore

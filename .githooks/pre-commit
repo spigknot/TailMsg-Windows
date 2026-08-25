@@ -1,2 +1,20 @@
 #!/bin/sh
-exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/.githooks/pre-commit.ps1"
+set -eu
+
+repository_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    printf '%s\n' 'TailMsg pre-commit: não foi possível localizar a raiz do Git.' >&2
+    exit 1
+}
+
+if command -v powershell.exe >/dev/null 2>&1; then
+    powershell_command="powershell.exe"
+elif command -v pwsh >/dev/null 2>&1; then
+    powershell_command="pwsh"
+else
+    printf '%s\n' 'TailMsg pre-commit: PowerShell não encontrado.' >&2
+    exit 1
+fi
+
+exec "$powershell_command" -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+    -File "$repository_root/.githooks/pre-commit.ps1" \
+    -RepositoryRoot "$repository_root"

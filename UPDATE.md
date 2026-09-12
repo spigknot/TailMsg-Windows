@@ -196,6 +196,10 @@ git push origin main
 ```
 
 - NUNCA commitar: `release/update-private-key.xml`, `release/packages/*.zip`, `release/generated/`, `dist/`, `build/`. Conferir `git status` antes do `git add -A` se houver dúvida.
+- Quando o release for gerado em uma **branch de trabalho** (por exemplo `agent/...`), não troque de branch: confirme que a `origin/main` está contida no HEAD
+  (`git rev-list --left-right --count origin/main...HEAD` deve mostrar `0` à esquerda) e publique com
+  `git push origin HEAD:main` (fast-forward). Empurre também a branch de trabalho com
+  `git push origin <branch>` para o histórico não ficar só na `main`.
 
 ## 8. Entrega (relatório final obrigatório)
 

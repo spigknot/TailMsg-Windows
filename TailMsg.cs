@@ -1586,6 +1586,7 @@ namespace TailMsg
             networkService.MessageReceived += NetworkServiceMessageReceived;
             networkService.ImageReceived += NetworkServiceImageReceived;
             networkService.AudioReceived += NetworkServiceAudioReceived;
+            networkService.MessageDeleted += NetworkServiceMessageDeleted;
 
             Text = "TailMsg";
             StartPosition = FormStartPosition.CenterScreen;
@@ -1868,7 +1869,7 @@ namespace TailMsg
 
             Label inboxLabel = new Label();
             inboxLabel.Dock = DockStyle.Fill;
-            inboxLabel.Text = "Mensagens recebidas";
+            inboxLabel.Text = "Histórico";
             inboxLabel.Font = new Font("Segoe UI Semibold", 10F);
             inboxLabel.TextAlign = ContentAlignment.BottomLeft;
             layout.Controls.Add(inboxLabel, 0, 3);
@@ -1877,6 +1878,8 @@ namespace TailMsg
             inboxBox.Dock = DockStyle.Fill;
             inboxBox.Font = new Font("Segoe UI", 9.5F);
             layout.Controls.Add(inboxBox, 0, 4);
+            // Só agora o painel existe para receber o pedido de deleção.
+            inboxBox.DeleteRequested += InboxDeleteRequested;
             LoadHistoryIntoInbox();
 
             Label messageLabel = new Label();
@@ -2301,6 +2304,17 @@ namespace TailMsg
 
         // Rolagem própria da lista de destinos: a barra fica fora do contorno.
         private bool peerLayingOut;
+
+        // Janelinhas de recebimento por operação, para fechar quando o
+        // remetente pedir "Deletar para todos".
+        private readonly Dictionary<string, ReceivedMessageForm> notificationsById =
+            new Dictionary<string, ReceivedMessageForm>(StringComparer.Ordinal);
+
+        private void RegisterNotification(string operationId, ReceivedMessageForm form)
+        {
+            if (String.IsNullOrEmpty(operationId) || form == null) return;
+            notificationsById[operationId] = form;
+        }
 
         private void LayoutPeerList()
         {
@@ -3494,6 +3508,9 @@ namespace TailMsg
                 bool sentText = false;
                 bool sentImage = false;
                 bool sentAudio = false;
+                string sentTextId = "";
+                string sentImageId = "";
+                string sentAudioId = "";
                 string failure = "";
 
                 if (message.Length > 0)
@@ -3503,6 +3520,7 @@ namespace TailMsg
                         localComputerName,
                         message);
                     sentText = textResult.Success;
+                    sentTextId = textResult.OperationId;
                     if (!textResult.Success) failure = textResult.ErrorMessage;
                 }
 
@@ -3513,6 +3531,7 @@ namespace TailMsg
                         localComputerName,
                         image);
                     sentImage = imageResult.Success;
+                    sentImageId = imageResult.OperationId;
                     if (!imageResult.Success) failure = imageResult.ErrorMessage;
                 }
 
@@ -3523,6 +3542,7 @@ namespace TailMsg
                         localComputerName,
                         audio);
                     sentAudio = audioResult.Success;
+                    sentAudioId = audioResult.OperationId;
                     if (!audioResult.Success) failure = audioResult.ErrorMessage;
                 }
 
@@ -3543,6 +3563,11 @@ namespace TailMsg
                     }
 
                     UpdateActionStates();
+                    RegisterSentMessages(
+                        computer,
+                        sentText, sentTextId, message,
+                        sentImage, sentImageId, image,
+                        sentAudio, sentAudioId, audio);
 
                     if (failure.Length == 0)
                     {
@@ -3562,6 +3587,82 @@ namespace TailMsg
                     }
                 });
             });
+        }
+
+        // Cada mensagem entregue entra no histórico como enviada: texto em
+        // verde alinhado à direita, imagem e áudio com o mesmo botão de sempre.
+        private void RegisterSentMessages(
+            PeerInfo computer,
+            bool sentText, string textId, string text,
+            bool sentImage, string imageId, ImagePayload image,
+            bool sentAudio, string audioId, AudioPayload audio)
+        {
+            string stamp = DateTime.Now.ToString("HH:mm:ss");
+            string who = computer == null ? "?" : computer.Name;
+            string address = computer == null ? "" : computer.Address;
+
+            if (sentText && text != null && text.Length > 0)
+            {
+                long seq = HistoryStore.Append(new HistoryEntry
+                {
+                    Kind = "sent",
+                    Time = stamp,
+                    Sender = who,
+                    Address = address,
+                    Text = text,
+                    OperationId = textId
+                });
+                InboxTextRow row = inboxBox.AppendMessage(who, text, stamp, true, seq, textId);
+                row.Address = address;
+                inboxBox.AttachMenu(row, seq, textId, true, "");
+            }
+
+            if (sentImage && image != null)
+            {
+                long size = image.PngBytes == null ? 0 : image.PngBytes.Length;
+                string file = HistoryStore.SaveMedia(image.PngBytes, ".png");
+                long seq = HistoryStore.Append(new HistoryEntry
+                {
+                    Kind = "sent-image",
+                    Time = stamp,
+                    Sender = who,
+                    Address = address,
+                    Size = size,
+                    FileName = file,
+                    OperationId = imageId
+                });
+                InboxImageRow row = inboxBox.AppendImage(
+                    who + ": [imagem " + ImageTransfer.DescribeBytes(size) + "] [" + stamp + "]",
+                    image.PngBytes,
+                    HistoryStore.MediaPath(file));
+                row.Seq = seq;
+                row.OperationId = imageId;
+                row.Sent = true;
+                inboxBox.AttachMenu(row, seq, imageId, true, "");
+            }
+
+            if (sentAudio && audio != null)
+            {
+                string file = HistoryStore.SaveMedia(audio.WavBytes, ".wav");
+                long seq = HistoryStore.Append(new HistoryEntry
+                {
+                    Kind = "sent-audio",
+                    Time = stamp,
+                    Sender = who,
+                    Address = address,
+                    DurationMilliseconds = audio.DurationMilliseconds,
+                    FileName = file,
+                    OperationId = audioId
+                });
+                InboxAudioRow row = inboxBox.AppendAudio(
+                    who + ": [áudio " + FormatDuration(audio.DurationMilliseconds / 1000) + "] [" + stamp + "]",
+                    audio,
+                    audioId);
+                row.Seq = seq;
+                row.OperationId = audioId;
+                row.Sent = true;
+                inboxBox.AttachMenu(row, seq, audioId, true, "");
+            }
         }
 
         private static string DescribeDelivery(
@@ -3629,22 +3730,25 @@ namespace TailMsg
                     0,
                     "");
                 string textStamp = DateTime.Now.ToString("HH:mm:ss");
-                string line = "[" + textStamp + "] " +
-                    e.SenderName + " (" + e.RemoteAddress + "): " + e.Message;
-                inboxBox.AppendText(line + Environment.NewLine);
-                HistoryStore.Append(new HistoryEntry
+                long textSeq = HistoryStore.Append(new HistoryEntry
                 {
                     Kind = "text",
                     Time = textStamp,
                     Sender = e.SenderName,
                     Address = e.RemoteAddress,
-                    Text = e.Message
+                    Text = e.Message,
+                    OperationId = e.OperationId
                 });
+                InboxTextRow receivedTextRow = inboxBox.AppendMessage(
+                    e.SenderName, e.Message, textStamp, false, textSeq, e.OperationId);
+                receivedTextRow.Address = e.RemoteAddress;
+                inboxBox.AttachMenu(receivedTextRow, textSeq, e.OperationId, false, "");
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,
                     localComputerName,
                     delegate { ShowFromTray(); });
                 notification.PeerCapabilityLookup = networkService.FindPeerCapabilities;
+                RegisterNotification(e.OperationId, notification);
                 notification.StatusReporter = delegate(string text, bool isError)
                 {
                     statusLabel.ForeColor = isError
@@ -3711,26 +3815,32 @@ namespace TailMsg
                 // recebida no aplicativo padrão do Windows.
                 string imageStamp = DateTime.Now.ToString("HH:mm:ss");
                 long imageSize = e.ImageBytes == null ? 0 : e.ImageBytes.Length;
-                string imagePrefix = "[" + imageStamp + "] " +
-                    e.SenderName + " (" + e.RemoteAddress + "): [imagem " +
-                    ImageTransfer.DescribeBytes(imageSize) + "]";
+                string imagePrefix = e.SenderName + ": [imagem " +
+                    ImageTransfer.DescribeBytes(imageSize) + "] [" + imageStamp + "]";
                 string imageFile = HistoryStore.SaveMedia(e.ImageBytes, ".png");
-                HistoryStore.Append(new HistoryEntry
+                long imageSeq = HistoryStore.Append(new HistoryEntry
                 {
                     Kind = "image",
                     Time = imageStamp,
                     Sender = e.SenderName,
                     Address = e.RemoteAddress,
                     Size = imageSize,
-                    FileName = imageFile
+                    FileName = imageFile,
+                    OperationId = e.OperationId
                 });
-                inboxBox.AppendImage(imagePrefix, e.ImageBytes, HistoryStore.MediaPath(imageFile));
+                InboxImageRow receivedImageRow = inboxBox.AppendImage(
+                    imagePrefix, e.ImageBytes, HistoryStore.MediaPath(imageFile));
+                receivedImageRow.Address = e.RemoteAddress;
+                receivedImageRow.Seq = imageSeq;
+                receivedImageRow.OperationId = e.OperationId;
+                inboxBox.AttachMenu(receivedImageRow, imageSeq, e.OperationId, false, "");
 
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,
                     localComputerName,
                     delegate { ShowFromTray(); });
                 notification.PeerCapabilityLookup = networkService.FindPeerCapabilities;
+                RegisterNotification(e.OperationId, notification);
                 notification.StatusReporter = delegate(string text, bool isError)
                 {
                     statusLabel.ForeColor = isError
@@ -3751,6 +3861,100 @@ namespace TailMsg
                 statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                 statusLabel.Text = "Imagem recebida de " + e.SenderName + ".";
             });
+        }
+
+        private void NetworkServiceMessageDeleted(object sender, MessageDeletedEventArgs e)
+        {
+            if (IsDisposed) return;
+            // O remetente pediu para apagar: sai do histórico e a janelinha
+            // daquela mensagem fecha, se ainda estiver aberta.
+            string operationId = e == null ? "" : e.OperationId;
+            if (String.IsNullOrEmpty(operationId)) return;
+            TryBeginInvoke(delegate
+            {
+                inboxBox.RemoveByOperationId(operationId);
+                HistoryStore.DeleteByOperationId(operationId);
+                CloseNotificationFor(operationId);
+                statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
+                statusLabel.Text = "Mensagem apagada por " + (e.SenderName ?? "remetente") + ".";
+            });
+        }
+
+        // Fecha a janelinha de recebimento daquela operação, se estiver aberta.
+        private void CloseNotificationFor(string operationId)
+        {
+            ReceivedMessageForm notification;
+            if (notificationsById.TryGetValue(operationId, out notification))
+            {
+                notificationsById.Remove(operationId);
+                if (notification != null && !notification.IsDisposed)
+                {
+                    receivedNotifications.Remove(notification);
+                    notification.Close();
+                    notification.Dispose();
+                }
+            }
+            RepositionNotifications();
+        }
+
+        // Menu de contexto das linhas do histórico.
+        private void InboxDeleteRequested(object sender, InboxDeleteEventArgs e)
+        {
+            if (e == null) return;
+            if (e.ForEveryone)
+            {
+                if (MessageBox.Show(this, "Confirma?", "Deletar para todos",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                {
+                    return;
+                }
+                PeerInfo peer = FindPeerByAddress(e.Address);
+                if (peer == null)
+                {
+                    MessageBox.Show(this,
+                        "O destinatário não está na lista agora; a mensagem foi apagada só aqui.",
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    PeerInfo target = peer;
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        string error;
+                        bool ok = MessageSender.SendDelete(target, e.OperationId, out error);
+                        if (!ok)
+                        {
+                            TryBeginInvoke(delegate
+                            {
+                                statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                                statusLabel.Text = "Não foi possível avisar " + target.Name + ".";
+                            });
+                        }
+                    });
+                }
+            }
+            else if (MessageBox.Show(this, "Confirma?", "Deletar",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            inboxBox.RemoveBySeq(e.Seq);
+            HistoryStore.DeleteBySeq(e.Seq);
+        }
+
+        private PeerInfo FindPeerByAddress(string address)
+        {
+            if (String.IsNullOrEmpty(address) || latestPeers == null) return null;
+            foreach (PeerInfo peer in latestPeers)
+            {
+                if (peer != null && String.Equals(peer.Address, address,
+                    StringComparison.Ordinal))
+                {
+                    return peer;
+                }
+            }
+            return null;
         }
 
         private void NetworkServiceAudioReceived(object sender, AudioReceivedEventArgs e)
@@ -3796,20 +4000,23 @@ namespace TailMsg
                 inboxAudio.DurationMilliseconds = e.DurationMilliseconds;
                 string audioStamp = DateTime.Now.ToString("HH:mm:ss");
                 InboxAudioRow audioRow = inboxBox.AppendAudio(
-                    "[" + audioStamp + "] " +
-                    e.SenderName + " (" + e.RemoteAddress + "): [áudio " +
-                    FormatDuration(e.DurationMilliseconds / 1000) + "]",
+                    e.SenderName + ": [áudio " +
+                    FormatDuration(e.DurationMilliseconds / 1000) + "] [" + audioStamp + "]",
                     inboxAudio,
                     e.OperationId);
-                audioRow.HistorySeq = HistoryStore.Append(new HistoryEntry
+                audioRow.Address = e.RemoteAddress;
+                long audioSeq = HistoryStore.Append(new HistoryEntry
                 {
                     Kind = "audio",
                     Time = audioStamp,
                     Sender = e.SenderName,
                     Address = e.RemoteAddress,
                     DurationMilliseconds = e.DurationMilliseconds,
-                    FileName = HistoryStore.SaveMedia(e.AudioBytes, ".wav")
+                    FileName = HistoryStore.SaveMedia(e.AudioBytes, ".wav"),
+                    OperationId = e.OperationId
                 });
+                audioRow.Seq = audioSeq;
+                inboxBox.AttachMenu(audioRow, audioSeq, e.OperationId, false, "");
                 StartInboxTranscription(audioRow);
 
                 ReceivedMessageForm notification = new ReceivedMessageForm(
@@ -3817,6 +4024,7 @@ namespace TailMsg
                     localComputerName,
                     delegate { ShowFromTray(); });
                 notification.PeerCapabilityLookup = networkService.FindPeerCapabilities;
+                RegisterNotification(e.OperationId, notification);
                 notification.StatusReporter = delegate(string text, bool isError)
                 {
                     statusLabel.ForeColor = isError
@@ -3884,38 +4092,49 @@ namespace TailMsg
             List<HistoryEntry> entries = HistoryStore.Load();
             foreach (HistoryEntry entry in entries)
             {
-                string prefix = "[" + entry.Time + "] " + entry.Sender +
-                    " (" + entry.Address + "): ";
-                if (entry.Kind == "text")
+                bool sent = entry.Kind != null && entry.Kind.StartsWith("sent", StringComparison.Ordinal);
+                bool isImage = entry.Kind != null && entry.Kind.EndsWith("image", StringComparison.Ordinal);
+                bool isAudio = entry.Kind != null && entry.Kind.EndsWith("audio", StringComparison.Ordinal);
+
+                if (!isImage && !isAudio)
                 {
-                    inboxBox.AppendText(prefix + entry.Text + Environment.NewLine);
+                    InboxTextRow row = inboxBox.AppendMessage(
+                        entry.Sender, entry.Text, entry.Time, sent, entry.Seq, entry.OperationId);
+                    row.Address = entry.Address;
+                    inboxBox.AttachMenu(row, entry.Seq, entry.OperationId, sent, "");
+                    continue;
                 }
-                else if (entry.Kind == "image")
+
+                string path = HistoryStore.MediaPath(entry.FileName);
+                bool exists = path.Length > 0 && File.Exists(path);
+                if (isImage)
                 {
-                    string path = HistoryStore.MediaPath(entry.FileName);
-                    bool exists = path.Length > 0 && File.Exists(path);
-                    inboxBox.AppendImage(
-                        prefix + "[imagem " + ImageTransfer.DescribeBytes(entry.Size) + "]",
+                    InboxImageRow row = inboxBox.AppendImage(
+                        entry.Sender + ": [imagem " + ImageTransfer.DescribeBytes(entry.Size) + "] [" + entry.Time + "]",
                         exists ? File.ReadAllBytes(path) : null,
                         exists ? path : null);
+                    row.Address = entry.Address;
+                    row.Seq = entry.Seq;
+                    row.OperationId = entry.OperationId;
+                    row.Sent = sent;
+                    inboxBox.AttachMenu(row, entry.Seq, entry.OperationId, sent, "");
+                    continue;
                 }
-                else if (entry.Kind == "audio")
-                {
-                    string path = HistoryStore.MediaPath(entry.FileName);
-                    if (path.Length == 0 || !File.Exists(path)) continue;
-                    AudioPayload payload = new AudioPayload();
-                    payload.WavBytes = File.ReadAllBytes(path);
-                    payload.DurationMilliseconds = entry.DurationMilliseconds;
-                    InboxAudioRow row = inboxBox.AppendAudio(
-                        prefix + "[áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "]",
-                        payload,
-                        "hist-" + entry.Seq.ToString(CultureInfo.InvariantCulture));
-                    row.HistorySeq = entry.Seq;
-                    if (!String.IsNullOrEmpty(entry.Text))
-                    {
-                        row.SetTranscription(entry.Text);
-                    }
-                }
+
+                if (!exists) continue;
+                AudioPayload payload = new AudioPayload();
+                payload.WavBytes = File.ReadAllBytes(path);
+                payload.DurationMilliseconds = entry.DurationMilliseconds;
+                InboxAudioRow audioRow = inboxBox.AppendAudio(
+                    entry.Sender + ": [áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "] [" + entry.Time + "]",
+                    payload,
+                    entry.OperationId);
+                audioRow.Address = entry.Address;
+                audioRow.Seq = entry.Seq;
+                audioRow.OperationId = entry.OperationId;
+                audioRow.Sent = sent;
+                if (!String.IsNullOrEmpty(entry.Text)) audioRow.SetTranscription(entry.Text);
+                inboxBox.AttachMenu(audioRow, entry.Seq, entry.OperationId, sent, entry.Text);
             }
         }
 
@@ -5528,6 +5747,13 @@ namespace TailMsg
         public string Sha256;
     }
 
+    internal sealed class MessageDeletedEventArgs : EventArgs
+    {
+        public string SenderName;
+        public string RemoteAddress;
+        public string OperationId;
+    }
+
     internal sealed class MessageSendResult
     {
         public bool Success;
@@ -5577,6 +5803,8 @@ namespace TailMsg
         public const string ImageFormatPng = "png";
         public const string Audio = "TAILMSG_AUDIO";
         public const string AudioEnd = "TAILMSG_AUDIO_END";
+        // Pedido para o destinatário apagar a mensagem (e fechar a janelinha).
+        public const string Delete = "TAILMSG_DELETE";
         public const string AudioFormatWav = "wav";
         public const int CapabilityImage = 1;
         public const int CapabilityAudio = 2;
@@ -5593,6 +5821,11 @@ namespace TailMsg
         public const long LargeImageWarningBytes = 50L * 1024L * 1024L;
         public const string AcknowledgementOk = Acknowledgement + "|1|OK";
         public const string AcknowledgementRejected = Acknowledgement + "|1|REJECT";
+
+        public static string BuildDelete(string operationId)
+        {
+            return Delete + "|1|" + (operationId ?? "");
+        }
 
         public static string Encode(string value)
         {
@@ -6141,6 +6374,7 @@ namespace TailMsg
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
         public event EventHandler<ImageReceivedEventArgs> ImageReceived;
         public event EventHandler<AudioReceivedEventArgs> AudioReceived;
+        public event EventHandler<MessageDeletedEventArgs> MessageDeleted;
 
         public NetworkService(string name)
             : this(name, TcpPort, DiscoveryPort, false)
@@ -6368,6 +6602,29 @@ namespace TailMsg
                         else
                         {
                             HandleAudioTransfer(stream, writer, line, remoteAddress);
+                        }
+                        return;
+                    }
+
+                    if (pieces.Length >= 3 && pieces[0] == TailMsgProtocol.Delete &&
+                        pieces[1] == "1" &&
+                        TailMsgDiagnostics.IsSafeOperationId(pieces[2]))
+                    {
+                        MessageDeletedEventArgs deleted = new MessageDeletedEventArgs();
+                        deleted.OperationId = pieces[2];
+                        deleted.RemoteAddress = remoteAddress;
+                        deleted.SenderName = remoteAddress;
+                        try
+                        {
+                            writer.WriteLine(TailMsgProtocol.AcknowledgementOk);
+                            writer.Flush();
+                        }
+                        catch (IOException)
+                        {
+                        }
+                        if (MessageDeleted != null)
+                        {
+                            MessageDeleted(this, deleted);
                         }
                         return;
                     }
@@ -7853,6 +8110,59 @@ namespace TailMsg
 
     internal static class MessageSender
     {
+        // Avisa o destinatário para apagar a mensagem daquela operação.
+        public static bool SendDelete(PeerInfo peer, string operationId, out string error)
+        {
+            error = "";
+            if (peer == null || String.IsNullOrEmpty(peer.Address) || peer.Port <= 0)
+            {
+                error = "O destinatário é inválido.";
+                return false;
+            }
+            if (String.IsNullOrEmpty(operationId))
+            {
+                error = "A mensagem não tem identificação para apagar no destinatário.";
+                return false;
+            }
+
+            TcpClient client = new TcpClient();
+            try
+            {
+                IAsyncResult connection = client.BeginConnect(peer.Address, peer.Port, null, null);
+                if (!connection.AsyncWaitHandle.WaitOne(4000))
+                {
+                    error = "O computador não respondeu na porta do TailMsg (38257).";
+                    return false;
+                }
+                client.EndConnect(connection);
+                client.SendTimeout = 6000;
+                client.ReceiveTimeout = 6000;
+
+                using (NetworkStream stream = client.GetStream())
+                using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                {
+                    writer.WriteLine(TailMsgProtocol.BuildDelete(operationId));
+                    writer.Flush();
+                    string response = NetworkService.ReadLineLimited(stream, 1024);
+                    if (response != TailMsgProtocol.Acknowledgement + "|1|OK")
+                    {
+                        error = "O destinatário não confirmou a deleção.";
+                        return false;
+                    }
+                }
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+            finally
+            {
+                client.Close();
+            }
+        }
+
         public static MessageSendResult Send(PeerInfo peer, string senderName, string message)
         {
             return Send(peer, senderName, message, null);

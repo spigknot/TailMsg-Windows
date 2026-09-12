@@ -18,6 +18,7 @@ namespace TailMsg
         public int DurationMilliseconds;
         public string FileName;
         public string Text;   // mensagem recebida ou transcrição do áudio
+        public string OperationId;
     }
 
     // Guarda o histórico em %LOCALAPPDATA%\TailMsg: um índice de texto
@@ -148,6 +149,49 @@ namespace TailMsg
             }
         }
 
+        // Apaga uma entrada (e a mídia dela) — usada pelo "Deletar".
+        public static bool DeleteBySeq(long seq)
+        {
+            if (seq == 0) return false;
+            lock (Gate)
+            {
+                List<HistoryEntry> entries = Load();
+                for (int index = 0; index < entries.Count; index++)
+                {
+                    if (entries[index].Seq != seq) continue;
+                    DeleteMedia(entries[index]);
+                    entries.RemoveAt(index);
+                    RewriteLocked(entries);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Apaga a entrada de uma operação ��� usada pelo "Deletar para todos".
+        public static bool DeleteByOperationId(string operationId)
+        {
+            if (String.IsNullOrEmpty(operationId)) return false;
+            lock (Gate)
+            {
+                List<HistoryEntry> entries = Load();
+                bool changed = false;
+                for (int index = entries.Count - 1; index >= 0; index--)
+                {
+                    if (!String.Equals(entries[index].OperationId, operationId,
+                        StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    DeleteMedia(entries[index]);
+                    entries.RemoveAt(index);
+                    changed = true;
+                }
+                if (changed) RewriteLocked(entries);
+                return changed;
+            }
+        }
+
         // Mantém as últimas entradas e limita o tamanho total da mídia,
         // apagando os arquivos das linhas descartadas.
         private static void PruneLocked()
@@ -229,7 +273,8 @@ namespace TailMsg
                 entry.Size.ToString(CultureInfo.InvariantCulture),
                 entry.DurationMilliseconds.ToString(CultureInfo.InvariantCulture),
                 Escape(entry.FileName),
-                Escape(entry.Text)
+                Escape(entry.Text),
+                Escape(entry.OperationId)
             });
         }
 
@@ -255,6 +300,7 @@ namespace TailMsg
             entry.DurationMilliseconds = Int32.TryParse(parts[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out duration) ? duration : 0;
             entry.FileName = Unescape(parts[7]);
             entry.Text = Unescape(parts[8]);
+            entry.OperationId = parts.Length > 9 ? Unescape(parts[9]) : "";
             return entry;
         }
 

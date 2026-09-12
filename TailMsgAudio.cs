@@ -1784,24 +1784,44 @@ namespace TailMsg
         }
     }
 
+    // Evento de deleção pedido pelo menu de contexto de uma linha.
+    internal sealed class InboxDeleteEventArgs : EventArgs
+    {
+        public long Seq;
+        public string OperationId;
+        public string Address;
+        public bool ForEveryone;
+    }
+
     internal sealed class InboxPanel : Panel
     {
         private const int PlayerSize = 22;
         private InboxAudioRow activeRow;
         private Font rowFont;
         private readonly VScrollBar scrollBar;
+        private readonly Panel viewport;
         private bool layingOut;
+
+        // Cor das mensagens enviadas (verde).
+        internal static readonly Color SentColor = Color.FromArgb(22, 128, 61);
+
+        public event EventHandler<InboxDeleteEventArgs> DeleteRequested;
 
         public InboxPanel()
         {
-            // A rolagem é própria: assim ela fica FORA do contorno (o AutoScroll
-            // do WinForms desenharia a barra dentro do retângulo) e o painel
-            // nunca mostra barra horizontal — o texto quebra linha.
+            // A rolagem é própria e fica FORA do contorno. O conteúdo vive em um
+            // painel interno com 1 px de margem, para nenhuma linha encostar na
+            // borda desenhada (era o pedaço de mensagem sobre o contorno).
             AutoScroll = false;
             BackColor = Color.White;
             BorderStyle = BorderStyle.None;
-            Padding = new Padding(6, 4, 6, 4);
+            Padding = new Padding(1, 1, 0, 1);
             rowFont = new Font("Segoe UI", 9.5F);
+
+            viewport = new Panel();
+            viewport.Dock = DockStyle.Fill;
+            viewport.BackColor = Color.White;
+            Controls.Add(viewport);
 
             scrollBar = new VScrollBar();
             scrollBar.Dock = DockStyle.Right;
@@ -1812,18 +1832,41 @@ namespace TailMsg
             Controls.Add(scrollBar);
         }
 
-        // Largura útil para o conteúdo (desconta a barra de rolagem, que é
-        // desenhada fora do contorno).
+        // O layout pode rodar antes do viewport existir (o próprio construtor
+        // adiciona controles), então a largura/altura precisam de guarda.
         private int ContentWidth
         {
             get
             {
-                int reserved = scrollBar != null && scrollBar.Visible ? scrollBar.Width : 0;
-                return Math.Max(120, ClientSize.Width - reserved - Padding.Horizontal - 20);
+                int width = viewport == null ? ClientSize.Width : viewport.ClientSize.Width;
+                return Math.Max(120, width - 18);
             }
         }
 
-        // Linhas de texto e de imagem continuam sendo texto simples.
+        private int ViewportHeight
+        {
+            get { return viewport == null ? ClientSize.Height : viewport.ClientSize.Height; }
+        }
+
+        // Texto do histórico: recebida alinhada à esquerda, enviada à direita.
+        public InboxTextRow AppendMessage(
+            string who,
+            string text,
+            string time,
+            bool sent,
+            long seq,
+            string operationId)
+        {
+            InboxTextRow row = new InboxTextRow(who, text, time, sent, rowFont);
+            row.Seq = seq;
+            row.OperationId = operationId;
+            row.Sent = sent;
+            AttachMenu(row, seq, operationId, sent, "");
+            AddRow(row);
+            return row;
+        }
+
+        // Linhas de texto simples (avisos e o histórico antigo).
         public void AppendText(string text)
         {
             if (String.IsNullOrEmpty(text)) return;
@@ -1836,13 +1879,10 @@ namespace TailMsg
                 label.Font = rowFont;
                 label.ForeColor = Color.FromArgb(31, 41, 55);
                 label.Text = line;
-                label.MaximumSize = new Size(ContentWidth, 0);
                 AddRow(label);
             }
         }
 
-        // Linha de imagem: prefixo com o resumo e o botão que abre a imagem
-        // no aplicativo padrão do Windows (mesmo tamanho do play do áudio).
         public InboxImageRow AppendImage(string prefix, byte[] imageBytes, string filePath)
         {
             InboxImageRow row = new InboxImageRow(prefix, imageBytes, filePath, PlayerSize, rowFont);
@@ -1850,7 +1890,6 @@ namespace TailMsg
             return row;
         }
 
-        // Linha de áudio: prefixo, botão de play/pause e transcrição.
         public InboxAudioRow AppendAudio(
             string prefix,
             AudioPayload audio,
@@ -1871,21 +1910,125 @@ namespace TailMsg
             return row;
         }
 
+        // Menu de contexto das linhas: deletar, deletar para todos e (nos
+        // áudios) a transcrição entre aspas e em itálico.
+        public void AttachMenu(
+            Control row,
+            long seq,
+            string operationId,
+            bool sent,
+            string transcription)
+        {
+            ContextMenuStrip menu = new ContextMenuStrip();
+            menu.Font = rowFont;
+
+            if (!String.IsNullOrEmpty(transcription))
+            {
+                ToolStripMenuItem quote = new ToolStripMenuItem("\"" + transcription + "\"");
+                quote.Font = new Font(rowFont, FontStyle.Italic);
+                quote.ForeColor = Color.FromArgb(75, 85, 99);
+                quote.Enabled = false;
+                menu.Items.Add(quote);
+                menu.Items.Add(new ToolStripSeparator());
+            }
+
+            InboxRowBase rowBase = row as InboxRowBase;
+            string address = rowBase == null ? "" : rowBase.Address;
+
+            ToolStripMenuItem delete = new ToolStripMenuItem("Deletar");
+            delete.Click += delegate { RaiseDelete(seq, operationId, address, false); };
+            menu.Items.Add(delete);
+
+            if (sent && !String.IsNullOrEmpty(operationId))
+            {
+                ToolStripMenuItem everywhere = new ToolStripMenuItem("Deletar para todos");
+                everywhere.Click += delegate { RaiseDelete(seq, operationId, address, true); };
+                menu.Items.Add(everywhere);
+            }
+
+            row.ContextMenuStrip = menu;
+            foreach (Control child in row.Controls)
+            {
+                child.ContextMenuStrip = menu;
+            }
+        }
+
+        private void RaiseDelete(long seq, string operationId, string address, bool forEveryone)
+        {
+            if (DeleteRequested == null) return;
+            InboxDeleteEventArgs args = new InboxDeleteEventArgs();
+            args.Seq = seq;
+            args.OperationId = operationId;
+            args.Address = address;
+            args.ForEveryone = forEveryone;
+            DeleteRequested(this, args);
+        }
+
+        // Remove a linha da tela (usado ao deletar e no "deletar para todos").
+        public bool RemoveRow(Control row)
+        {
+            if (row == null) return false;
+            if (activeRow == row as InboxAudioRow)
+            {
+                activeRow = null;
+            }
+            InboxAudioRow audioRow = row as InboxAudioRow;
+            if (audioRow != null) audioRow.StopPlayback();
+            viewport.Controls.Remove(row);
+            row.Dispose();
+            LayoutRows();
+            return true;
+        }
+
+        public bool RemoveBySeq(long seq)
+        {
+            foreach (Control control in Snapshot())
+            {
+                InboxRowBase baseRow = control as InboxRowBase;
+                if (baseRow != null && baseRow.Seq == seq) return RemoveRow(control);
+            }
+            return false;
+        }
+
+        public bool RemoveByOperationId(string operationId)
+        {
+            if (String.IsNullOrEmpty(operationId)) return false;
+            bool removed = false;
+            foreach (Control control in Snapshot())
+            {
+                InboxRowBase baseRow = control as InboxRowBase;
+                if (baseRow != null && String.Equals(baseRow.OperationId, operationId,
+                    StringComparison.Ordinal))
+                {
+                    removed = RemoveRow(control) || removed;
+                }
+            }
+            return removed;
+        }
+
+        private Control[] Snapshot()
+        {
+            if (viewport == null) return new Control[0];
+            Control[] children = new Control[viewport.Controls.Count];
+            viewport.Controls.CopyTo(children, 0);
+            return children;
+        }
+
         public void Clear()
         {
+            if (viewport == null) return;
             if (activeRow != null)
             {
                 activeRow.StopPlayback();
                 activeRow = null;
             }
-            SuspendLayout();
-            while (Controls.Count > 0)
+            foreach (Control control in Snapshot())
             {
-                Control control = Controls[0];
-                Controls.RemoveAt(0);
+                InboxAudioRow audioRow = control as InboxAudioRow;
+                if (audioRow != null) audioRow.StopPlayback();
+                viewport.Controls.Remove(control);
                 control.Dispose();
             }
-            ResumeLayout();
         }
 
         protected override void Dispose(bool disposing)
@@ -1900,12 +2043,20 @@ namespace TailMsg
 
         private void AddRow(Control row)
         {
-            SuspendLayout();
+            if (viewport == null) return;
+            viewport.SuspendLayout();
             row.Width = ContentWidth;
-            Controls.Add(row);
-            ResumeLayout();
+            viewport.Controls.Add(row);
+            viewport.ResumeLayout();
             LayoutRows();
             ScrollToBottom();
+        }
+
+        // Mantém a última mensagem visível, como em um aplicativo de conversa.
+        private void ScrollToBottom()
+        {
+            if (scrollBar == null || !scrollBar.Visible) return;
+            SetScrollValue(scrollBar.Maximum);
         }
 
         protected override void OnClientSizeChanged(EventArgs e)
@@ -1924,13 +2075,6 @@ namespace TailMsg
             }
         }
 
-        // Mantém a última linha visível quando chega uma mensagem nova.
-        private void ScrollToBottom()
-        {
-            if (scrollBar == null || !scrollBar.Visible) return;
-            SetScrollValue(scrollBar.Maximum);
-        }
-
         private void SetScrollValue(int value)
         {
             int maximum = Math.Max(0, scrollBar.Maximum - scrollBar.LargeChange + 1);
@@ -1942,21 +2086,11 @@ namespace TailMsg
             LayoutRows();
         }
 
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            int reserved = scrollBar != null && scrollBar.Visible ? scrollBar.Width : 0;
-            BoxBorder.Draw(e.Graphics, this, reserved);
-        }
-
-        // Empilha as linhas de cima para baixo, cada uma com a altura que o
-        // conteúdo pedir (a transcrição pode ocupar mais de uma linha).
         // Posiciona as linhas e ajusta a barra em passadas curtas: a largura
-        // útil depende de a barra estar visível, e a altura do conteúdo depende
-        // da largura. A guarda corta a recursão que estourava a pilha.
+        // útil depende da barra, e a altura do conteúdo depende da largura.
         private void LayoutRows()
         {
-            if (layingOut) return;
+            if (layingOut || viewport == null || scrollBar == null) return;
             layingOut = true;
             try
             {
@@ -1964,29 +2098,27 @@ namespace TailMsg
                 {
                     bool visibleBefore = scrollBar.Visible;
                     int width = ContentWidth;
-                    int start = Padding.Top - scrollBar.Value;
+                    int start = -scrollBar.Value;
                     int top = start;
-                    foreach (Control control in Controls)
+                    foreach (Control control in Snapshot())
                     {
-                        if (control == scrollBar) continue;
                         control.Width = width;
-                        control.Location = new Point(Padding.Left, top);
+                        control.Location = new Point(0, top);
                         top += control.Height + 2;
                     }
 
-                    int contentHeight = top - start + Padding.Bottom;
-                    int viewport = ClientSize.Height - Padding.Vertical;
-                    int overflow = Math.Max(0, contentHeight - viewport);
+                    int contentHeight = top - start;
+                    int viewportHeight = ViewportHeight;
+                    int overflow = Math.Max(0, contentHeight - viewportHeight);
                     bool needed = overflow > 0;
 
-                    scrollBar.LargeChange = Math.Max(1, viewport / 4);
+                    scrollBar.LargeChange = Math.Max(1, viewportHeight / 4);
                     scrollBar.Maximum = overflow + scrollBar.LargeChange - 1;
                     int maximum = Math.Max(0, scrollBar.Maximum - scrollBar.LargeChange + 1);
                     if (scrollBar.Value > maximum) scrollBar.Value = maximum;
 
                     if (needed != visibleBefore)
                     {
-                        // A barra entra ou sai e muda a largura útil: refaz.
                         scrollBar.Visible = needed;
                         continue;
                     }
@@ -1999,11 +2131,61 @@ namespace TailMsg
             }
             Invalidate();
         }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            int reserved = scrollBar != null && scrollBar.Visible ? scrollBar.Width : 0;
+            BoxBorder.Draw(e.Graphics, this, reserved);
+        }
+    }
+
+    // Base das linhas que o menu de contexto pode apagar.
+    internal abstract class InboxRowBase : Panel
+    {
+        public long Seq { get; set; }
+        public string OperationId { get; set; }
+        public string Address { get; set; }
+        public bool Sent { get; set; }
+    }
+
+    // Linha de mensagem de texto: recebida à esquerda, enviada à direita.
+    internal sealed class InboxTextRow : InboxRowBase
+    {
+        private readonly Label label;
+
+        public InboxTextRow(string who, string text, string time, bool sent, Font font)
+        {
+            BackColor = Color.White;
+            label = new Label();
+            label.Font = font;
+            label.AutoSize = true;
+            label.ForeColor = sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
+            label.Text = who + ": " + text + " [" + time + "]";
+            Controls.Add(label);
+            LayoutRow();
+        }
+
+        public string Text
+        {
+            get { return label.Text; }
+        }
+
+        public void LayoutRow()
+        {
+            int available = Parent == null ? Width : Parent.ClientSize.Width;
+            available = Math.Max(160, available - 8);
+            label.MaximumSize = new Size(available, 0);
+            int left = Sent ? Math.Max(0, available - label.Width) : 0;
+            label.Location = new Point(left, 0);
+            Width = available;
+            Height = Math.Max(18, label.Height + 2);
+        }
     }
 
     // Uma linha de imagem do histórico: prefixo e botão que abre a imagem no
     // aplicativo padrão do Windows.
-    internal sealed class InboxImageRow : Panel
+    internal sealed class InboxImageRow : InboxRowBase
     {
         private static Image imageGlyph;
         private readonly byte[] imageBytes;
@@ -2160,7 +2342,7 @@ namespace TailMsg
     }
 
     // Uma linha de áudio do histórico: prefixo, play/pause e transcrição.
-    internal sealed class InboxAudioRow : Panel
+    internal sealed class InboxAudioRow : InboxRowBase
     {
         private readonly AudioPayload audio;
         private readonly IconButton playButton;
@@ -2170,7 +2352,6 @@ namespace TailMsg
         private readonly System.Windows.Forms.Timer ticker;
 
         public event EventHandler PlayRequested;
-        public string OperationId { get; private set; }
 
         // Identificador da linha no histórico persistente (0 quando não gravada).
         public long HistorySeq { get; set; }
@@ -2240,12 +2421,13 @@ namespace TailMsg
         }
 
         // Texto da transcrição, exibido depois do botão de play.
+        // A transcrição não aparece no histórico: fica guardada para o menu de
+        // contexto (item entre aspas, em itálico).
+        public string Transcription { get; private set; }
+
         public void SetTranscription(string text)
         {
-            transcriptionLabel.Text = String.IsNullOrEmpty(text)
-                ? ""
-                : "- \"" + text + "\"";
-            LayoutRow();
+            Transcription = text ?? "";
         }
 
         public void StopPlayback()

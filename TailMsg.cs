@@ -1720,7 +1720,7 @@ namespace TailMsg
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 43F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
             content.Controls.Add(layout);
             contentLayout = layout;
 
@@ -1819,8 +1819,8 @@ namespace TailMsg
 
             Panel listBorder = new Panel();
             listBorder.Dock = DockStyle.Fill;
-            listBorder.Padding = new Padding(1);
-            listBorder.BackColor = Color.FromArgb(209, 213, 219);
+            listBorder.Padding = new Padding(0);
+            listBorder.BackColor = Color.White;
             computerArea.Controls.Add(listBorder, 0, 1);
 
             computerList = new FlowLayoutPanel();
@@ -1831,6 +1831,12 @@ namespace TailMsg
             computerList.Padding = new Padding(10, 8, 10, 8);
             computerList.BackColor = Color.White;
             computerList.Resize += ResizeComputerOptions;
+            // Mesmo contorno da caixa de mensagem, sem envolver a barra de
+            // rolagem (quando ela existe, a borda para antes dela).
+            computerList.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                BoxBorder.Draw(e.Graphics, computerList);
+            };
             listBorder.Controls.Add(computerList);
 
             Label inboxLabel = new Label();
@@ -1844,6 +1850,7 @@ namespace TailMsg
             inboxBox.Dock = DockStyle.Fill;
             inboxBox.Font = new Font("Segoe UI", 9.5F);
             layout.Controls.Add(inboxBox, 0, 4);
+            LoadHistoryIntoInbox();
 
             Label messageLabel = new Label();
             messageLabel.Dock = DockStyle.Fill;
@@ -1920,13 +1927,6 @@ namespace TailMsg
             // quadro branco) quando o áudio é anexado. A transcrição aparece na
             // própria caixa onde a mensagem é digitada.
 
-            Label senderLabel = new Label();
-            senderLabel.Dock = DockStyle.Fill;
-            senderLabel.ForeColor = Color.FromArgb(107, 114, 128);
-            senderLabel.Text = "Será enviada como: " + localComputerName + ": sua mensagem";
-            senderLabel.TextAlign = ContentAlignment.BottomLeft;
-            layout.Controls.Add(senderLabel, 0, 9);
-
             ContextMenu trayMenu = new ContextMenu();
             trayMenu.MenuItems.Add("Abrir TailMsg", delegate { ShowFromTray(); });
             trayMenu.MenuItems.Add("Sair", delegate
@@ -1999,7 +1999,7 @@ namespace TailMsg
                         networkService.Start();
                         serviceReady = true;
                         serviceDetail = "network-service-ready";
-                        statusLabel.Text = "Serviço ativo. Procurando TailMsg na rede...";
+                        statusLabel.Text = "";
                     }
                     catch (Exception exception)
                     {
@@ -2112,7 +2112,7 @@ namespace TailMsg
                     if (serviceReady && updateConfirmed)
                     {
                         statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
-                        statusLabel.Text = "Serviço ativo. Procurando TailMsg na rede...";
+                        statusLabel.Text = "";
                         RefreshComputers();
                         discoveryTimer.Start();
                         CheckForUpdates(false);
@@ -2436,7 +2436,7 @@ namespace TailMsg
             isRefreshing = true;
             UpdateActionStates();
             statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
-            statusLabel.Text = "Procurando TailMsg nas redes 10.x.x.x e 100.x.x.x...";
+            statusLabel.Text = "";
 
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -2451,7 +2451,7 @@ namespace TailMsg
                         int remoteCount = CountRemotePeers(visibleComputers);
                         statusLabel.Text = remoteCount == 0
                             ? NetworkDiscovery.GetDiscoverySummary()
-                            : "Pronto para enviar.";
+                            : "";
                     });
                 }
                 catch (Exception exception)
@@ -2489,7 +2489,7 @@ namespace TailMsg
             {
                 statusLabel.Text = CountRemotePeers(visibleComputers) == 0
                     ? "Nenhum outro TailMsg visível nos filtros selecionados."
-                    : "Pronto para enviar.";
+                    : "";
             }
         }
 
@@ -3540,9 +3540,18 @@ namespace TailMsg
                     e.Fingerprint,
                     0,
                     "");
-                string line = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
+                string textStamp = DateTime.Now.ToString("HH:mm:ss");
+                string line = "[" + textStamp + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): " + e.Message;
                 inboxBox.AppendText(line + Environment.NewLine);
+                HistoryStore.Append(new HistoryEntry
+                {
+                    Kind = "text",
+                    Time = textStamp,
+                    Sender = e.SenderName,
+                    Address = e.RemoteAddress,
+                    Text = e.Message
+                });
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,
                     localComputerName,
@@ -3612,11 +3621,22 @@ namespace TailMsg
 
                 // O histórico mostra o resumo e um botão que abre a imagem
                 // recebida no aplicativo padrão do Windows.
-                string imagePrefix = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
+                string imageStamp = DateTime.Now.ToString("HH:mm:ss");
+                long imageSize = e.ImageBytes == null ? 0 : e.ImageBytes.Length;
+                string imagePrefix = "[" + imageStamp + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): [imagem " +
-                    ImageTransfer.DescribeBytes(
-                        e.ImageBytes == null ? 0 : e.ImageBytes.Length) + "]";
-                inboxBox.AppendImage(imagePrefix, e.ImageBytes);
+                    ImageTransfer.DescribeBytes(imageSize) + "]";
+                string imageFile = HistoryStore.SaveMedia(e.ImageBytes, ".png");
+                HistoryStore.Append(new HistoryEntry
+                {
+                    Kind = "image",
+                    Time = imageStamp,
+                    Sender = e.SenderName,
+                    Address = e.RemoteAddress,
+                    Size = imageSize,
+                    FileName = imageFile
+                });
+                inboxBox.AppendImage(imagePrefix, e.ImageBytes, HistoryStore.MediaPath(imageFile));
 
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,
@@ -3686,12 +3706,22 @@ namespace TailMsg
                 AudioPayload inboxAudio = new AudioPayload();
                 inboxAudio.WavBytes = e.AudioBytes;
                 inboxAudio.DurationMilliseconds = e.DurationMilliseconds;
+                string audioStamp = DateTime.Now.ToString("HH:mm:ss");
                 InboxAudioRow audioRow = inboxBox.AppendAudio(
-                    "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
+                    "[" + audioStamp + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): [áudio " +
                     FormatDuration(e.DurationMilliseconds / 1000) + "]",
                     inboxAudio,
                     e.OperationId);
+                audioRow.HistorySeq = HistoryStore.Append(new HistoryEntry
+                {
+                    Kind = "audio",
+                    Time = audioStamp,
+                    Sender = e.SenderName,
+                    Address = e.RemoteAddress,
+                    DurationMilliseconds = e.DurationMilliseconds,
+                    FileName = HistoryStore.SaveMedia(e.AudioBytes, ".wav")
+                });
                 StartInboxTranscription(audioRow);
 
                 ReceivedMessageForm notification = new ReceivedMessageForm(
@@ -3731,6 +3761,7 @@ namespace TailMsg
             if (TranscriptionCache.TryGet(operationId, out cached))
             {
                 row.SetTranscription(cached);
+                HistoryStore.UpdateTranscription(row.HistorySeq, cached);
                 return;
             }
 
@@ -3749,8 +3780,55 @@ namespace TailMsg
                     out error);
                 if (!ok) return;
                 TranscriptionCache.Remember(operationId, text);
-                TryBeginInvoke(delegate { row.SetTranscription(text); });
+                TryBeginInvoke(delegate
+                {
+                    row.SetTranscription(text);
+                    HistoryStore.UpdateTranscription(row.HistorySeq, text);
+                });
             });
+        }
+
+        // Reconstroi o histórico salvo em disco no mesmo formato usado ao vivo:
+        // as imagens e os áudios voltam com o botão de abrir/tocar apontando
+        // para o arquivo guardado em %LOCALAPPDATA%\TailMsg\historico-midia.
+        private void LoadHistoryIntoInbox()
+        {
+            List<HistoryEntry> entries = HistoryStore.Load();
+            foreach (HistoryEntry entry in entries)
+            {
+                string prefix = "[" + entry.Time + "] " + entry.Sender +
+                    " (" + entry.Address + "): ";
+                if (entry.Kind == "text")
+                {
+                    inboxBox.AppendText(prefix + entry.Text + Environment.NewLine);
+                }
+                else if (entry.Kind == "image")
+                {
+                    string path = HistoryStore.MediaPath(entry.FileName);
+                    bool exists = path.Length > 0 && File.Exists(path);
+                    inboxBox.AppendImage(
+                        prefix + "[imagem " + ImageTransfer.DescribeBytes(entry.Size) + "]",
+                        exists ? File.ReadAllBytes(path) : null,
+                        exists ? path : null);
+                }
+                else if (entry.Kind == "audio")
+                {
+                    string path = HistoryStore.MediaPath(entry.FileName);
+                    if (path.Length == 0 || !File.Exists(path)) continue;
+                    AudioPayload payload = new AudioPayload();
+                    payload.WavBytes = File.ReadAllBytes(path);
+                    payload.DurationMilliseconds = entry.DurationMilliseconds;
+                    InboxAudioRow row = inboxBox.AppendAudio(
+                        prefix + "[áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "]",
+                        payload,
+                        "hist-" + entry.Seq.ToString(CultureInfo.InvariantCulture));
+                    row.HistorySeq = entry.Seq;
+                    if (!String.IsNullOrEmpty(entry.Text))
+                    {
+                        row.SetTranscription(entry.Text);
+                    }
+                }
+            }
         }
 
         private void RepositionNotifications()

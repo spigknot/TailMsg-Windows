@@ -1764,6 +1764,30 @@ namespace TailMsg
 
     // Histórico de mensagens recebidas. Substitui a caixa de texto simples:
     // as linhas de áudio trazem um botão de play e a transcrição ao lado.
+    // Contorno das caixas de lista: a mesma borda da caixa de mensagem
+    // (o cinza do FixedSingle) desenhada à mão, porque o retângulo para antes
+    // da barra de rolagem — o FixedSingle a envolveria.
+    internal static class BoxBorder
+    {
+        public static readonly Color LineColor = Color.FromArgb(100, 100, 100);
+
+        public static void Draw(Graphics graphics, ScrollableControl target)
+        {
+            if (graphics == null || target == null) return;
+            int width = target.ClientSize.Width;
+            if (target.VerticalScroll.Visible)
+            {
+                width -= SystemInformation.VerticalScrollBarWidth;
+            }
+            int height = target.ClientSize.Height;
+            if (width <= 1 || height <= 1) return;
+            using (Pen pen = new Pen(LineColor))
+            {
+                graphics.DrawRectangle(pen, 0, 0, width - 1, height - 1);
+            }
+        }
+    }
+
     internal sealed class InboxPanel : Panel
     {
         private const int PlayerSize = 22;
@@ -1774,7 +1798,7 @@ namespace TailMsg
         {
             AutoScroll = true;
             BackColor = Color.White;
-            BorderStyle = BorderStyle.FixedSingle;
+            BorderStyle = BorderStyle.None;
             Padding = new Padding(6, 4, 6, 4);
             rowFont = new Font("Segoe UI", 9.5F);
         }
@@ -1799,9 +1823,9 @@ namespace TailMsg
 
         // Linha de imagem: prefixo com o resumo e o botão que abre a imagem
         // no aplicativo padrão do Windows (mesmo tamanho do play do áudio).
-        public InboxImageRow AppendImage(string prefix, byte[] imageBytes)
+        public InboxImageRow AppendImage(string prefix, byte[] imageBytes, string filePath)
         {
-            InboxImageRow row = new InboxImageRow(prefix, imageBytes, PlayerSize, rowFont);
+            InboxImageRow row = new InboxImageRow(prefix, imageBytes, filePath, PlayerSize, rowFont);
             AddRow(row);
             return row;
         }
@@ -1870,6 +1894,12 @@ namespace TailMsg
             LayoutRows();
         }
 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            BoxBorder.Draw(e.Graphics, this);
+        }
+
         // Empilha as linhas de cima para baixo, cada uma com a altura que o
         // conteúdo pedir (a transcrição pode ocupar mais de uma linha).
         private void LayoutRows()
@@ -1891,12 +1921,14 @@ namespace TailMsg
     {
         private static Image imageGlyph;
         private readonly byte[] imageBytes;
+        private readonly string filePath;
         private readonly Label prefixLabel;
         private readonly IconButton openButton;
 
-        public InboxImageRow(string prefix, byte[] imageBytes, int iconSize, Font font)
+        public InboxImageRow(string prefix, byte[] imageBytes, string filePath, int iconSize, Font font)
         {
             this.imageBytes = imageBytes;
+            this.filePath = filePath;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             BackColor = Color.White;
@@ -1916,7 +1948,7 @@ namespace TailMsg
             openButton.CircleOutline = Color.FromArgb(196, 202, 210);
             openButton.Size = new Size(iconSize, iconSize);
             openButton.Location = new Point(prefixLabel.Right + 4, 0);
-            openButton.Enabled = imageBytes != null && imageBytes.Length > 0;
+            openButton.Enabled = HasImage();
             openButton.AccessibleName = "Abrir imagem";
             openButton.Click += delegate { OpenImage(); };
             Controls.Add(openButton);
@@ -1950,8 +1982,33 @@ namespace TailMsg
 
         // Grava os bytes em um arquivo temporário e entrega ao sistema, que
         // abre com o aplicativo padrão do usuário (mesmo caminho do Explorer).
+        private bool HasImage()
+        {
+            return (imageBytes != null && imageBytes.Length > 0) ||
+                (!String.IsNullOrEmpty(filePath) && File.Exists(filePath));
+        }
+
         private void OpenImage()
         {
+            // Imagem do histórico persistente: o arquivo já está em disco.
+            if (!String.IsNullOrEmpty(filePath) && File.Exists(filePath))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(filePath) { UseShellExecute = true });
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(
+                        this,
+                        "Não foi possível abrir a imagem: " + error.Message,
+                        "TailMsg",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+                return;
+            }
+
             if (imageBytes == null || imageBytes.Length == 0)
             {
                 MessageBox.Show(
@@ -2012,6 +2069,9 @@ namespace TailMsg
 
         public event EventHandler PlayRequested;
         public string OperationId { get; private set; }
+
+        // Identificador da linha no histórico persistente (0 quando não gravada).
+        public long HistorySeq { get; set; }
 
         // O payload fica exposto para a transcrição do histórico.
         public AudioPayload Audio

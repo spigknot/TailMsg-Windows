@@ -106,6 +106,7 @@ Invoke-Compiler @(
     "/reference:System.Windows.Forms.dll",
     "$projectDirectory\TailMsg.cs",
     "$projectDirectory\TailMsgAudio.cs",
+    "$projectDirectory\TailMsgHistory.cs",
     "$projectDirectory\TailMsgUpdate.cs",
     "$projectDirectory\UpdateConfig.cs",
     "$projectDirectory\TailMsgDiagnostics.cs",

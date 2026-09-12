@@ -1495,14 +1495,14 @@ namespace TailMsg
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr windowHandle, int command);
 
-        private readonly FlowLayoutPanel computerList;
+        private readonly TableLayoutPanel computerList;
+        private readonly ToolTip peerTooltip;
         private readonly MessageTextBox messageBox;
         private VScrollBar peerScroll;
         private Panel peerViewport;
         private Panel peerListBorder;
         private readonly InboxPanel inboxBox;
         private readonly Button sendButton;
-        private readonly Button refreshButton;
         private readonly Button updateButton;
         private readonly CheckBox delegaciaCheckBox;
         private readonly CheckBox tailscaleCheckBox;
@@ -1810,16 +1810,6 @@ namespace TailMsg
             tailscaleCheckBox.CheckedChanged += InterfaceFilterChanged;
             interfacePanel.Controls.Add(tailscaleCheckBox);
 
-            refreshButton = new Button();
-            refreshButton.Text = "Atualizar";
-            refreshButton.Size = new Size(142, 30);
-            refreshButton.Location = new Point(0, 101);
-            refreshButton.FlatStyle = FlatStyle.Flat;
-            refreshButton.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
-            refreshButton.BackColor = Color.White;
-            refreshButton.Cursor = Cursors.Hand;
-            refreshButton.Click += delegate { RefreshComputers(); };
-            interfacePanel.Controls.Add(refreshButton);
 
             Panel listBorder = new Panel();
             listBorder.Dock = DockStyle.Fill;
@@ -1850,12 +1840,17 @@ namespace TailMsg
                     peerScroll != null && peerScroll.Visible ? peerScroll.Width : 0);
             };
 
-            computerList = new FlowLayoutPanel();
+            peerTooltip = new ToolTip();
+            // O balãozinho com o IP aparece depois de 1 segundo com o mouse parado.
+            peerTooltip.InitialDelay = 1000;
+            peerTooltip.ReshowDelay = 400;
+            peerTooltip.AutoPopDelay = 6000;
+
+            // Uma coluna por interface marcada; cada célula guarda os
+            // destinatários daquela interface.
+            computerList = new TableLayoutPanel();
             computerList.AutoSize = true;
             computerList.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            computerList.FlowDirection = FlowDirection.TopDown;
-            computerList.WrapContents = false;
-            computerList.AutoScroll = false;
             computerList.Padding = new Padding(10, 8, 10, 8);
             computerList.BackColor = Color.White;
             computerList.Location = new Point(0, 0);
@@ -2295,10 +2290,11 @@ namespace TailMsg
             if (peerViewport == null || computerList == null) return;
             int available = peerViewport.ClientSize.Width;
             if (available <= 0) return;
-            int width = Math.Max(100, available - 30);
-            foreach (Control control in computerList.Controls)
+            int columns = Math.Max(1, computerList.ColumnCount);
+            int width = Math.Max(90, (available - 30) / columns - 8);
+            foreach (RadioButton option in DestinationOptions())
             {
-                if (control.Width != width) control.Width = width;
+                if (option.Width != width) option.Width = width;
             }
         }
 
@@ -2625,32 +2621,173 @@ namespace TailMsg
             return count;
         }
 
+        // Uma coluna por interface marcada nas checkboxes, atualizada em tempo
+        // real quando elas mudam.
+        private List<string> SelectedInterfaces()
+        {
+            List<string> interfaces = new List<string>();
+            if (delegaciaCheckBox.Checked) interfaces.Add("Rede 10.x.x.x");
+            if (tailscaleCheckBox.Checked) interfaces.Add("Tailscale 100.x.x.x");
+            return interfaces;
+        }
+
+        private static bool PeerBelongsToInterface(PeerInfo peer, string iface)
+        {
+            if (peer == null) return false;
+            IPAddress address;
+            if (!IPAddress.TryParse(peer.Address, out address)) return false;
+            if (iface.StartsWith("Rede", StringComparison.Ordinal))
+            {
+                return NetworkDiscovery.IsDelegaciaAddress(address);
+            }
+            return NetworkDiscovery.IsTailscaleAddress(address);
+        }
+
         private void PopulateComputers(List<PeerInfo> computers)
         {
-            string selectedAddress = GetSelectedAddress();
+            List<string> selected = GetSelectedAddresses();
+            List<string> interfaces = SelectedInterfaces();
+
             computerList.SuspendLayout();
             computerList.Controls.Clear();
+            computerList.ColumnStyles.Clear();
+            computerList.RowStyles.Clear();
+            computerList.ColumnCount = interfaces.Count;
+            computerList.RowCount = 2;
+            computerList.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+            computerList.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-            foreach (PeerInfo computer in computers)
+            int interfaceIndex = 0;
+            foreach (string iface in interfaces)
             {
-                RadioButton option = new RadioButton();
-                option.AutoSize = false;
-                option.Height = 20;
-                option.Width = Math.Max(100, computerList.ClientSize.Width - 30);
-                option.Margin = new Padding(0);
-                option.Padding = new Padding(5, 0, 0, 0);
-                option.Text = computer.Name + "  (" + computer.Address + ")" +
-                    (computer.IsLocal ? "  [você]" : "");
-                option.Tag = computer;
-                option.Checked = computer.Address == selectedAddress;
-                option.CheckedChanged += DestinationSelectionChanged;
-                option.Cursor = Cursors.Hand;
-                computerList.Controls.Add(option);
+                computerList.ColumnStyles.Add(
+                    new ColumnStyle(SizeType.Percent, 100F / interfaces.Count));
+
+                Label header = new Label();
+                header.Text = iface;
+                header.Dock = DockStyle.Fill;
+                header.Font = new Font("Segoe UI Semibold", 9F);
+                header.ForeColor = Color.FromArgb(107, 114, 128);
+                header.TextAlign = ContentAlignment.MiddleLeft;
+                computerList.Controls.Add(header, interfaceIndex, 0);
+
+                FlowLayoutPanel column = new FlowLayoutPanel();
+                column.FlowDirection = FlowDirection.TopDown;
+                column.WrapContents = false;
+                column.AutoSize = true;
+                column.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                column.Dock = DockStyle.Fill;
+                column.BackColor = Color.White;
+                column.Margin = new Padding(0);
+                computerList.Controls.Add(column, interfaceIndex, 1);
+
+                foreach (PeerInfo computer in computers)
+                {
+                    if (!PeerBelongsToInterface(computer, iface)) continue;
+
+                    RadioButton option = new RadioButton();
+                    option.AutoSize = false;
+                    option.Height = 20;
+                    option.Width = 150;
+                    option.Margin = new Padding(0);
+                    option.Padding = new Padding(5, 0, 0, 0);
+                    // Multi-seleção: o estado é controlado no clique, sem o
+                    // comportamento de grupo do RadioButton.
+                    option.AutoCheck = false;
+                    option.Text = computer.Name + (computer.IsLocal ? "  [você]" : "");
+                    option.Tag = computer;
+                    option.Checked = selected.Contains(computer.Address);
+                    option.Cursor = Cursors.Hand;
+                    option.Click += DestinationOptionClick;
+                    option.MouseUp += DestinationOptionMouseUp;
+                    peerTooltip.SetToolTip(option, "IP: " + computer.Address);
+                    column.Controls.Add(option);
+                }
+                interfaceIndex++;
             }
 
             computerList.ResumeLayout();
             countLabel.Text = "(" + computers.Count + ")";
+            ResizeComputerItems();
             UpdateActionStates();
+        }
+
+        // Clique alterna a marca (permite escolher vários destinatários).
+        private void DestinationOptionClick(object sender, EventArgs e)
+        {
+            RadioButton option = sender as RadioButton;
+            if (option == null) return;
+            option.Checked = !option.Checked;
+            UpdateActionStates();
+        }
+
+        // Clique com o botão direito copia o IP daquele destinatário.
+        private void DestinationOptionMouseUp(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right) return;
+            RadioButton option = sender as RadioButton;
+            PeerInfo peer = option == null ? null : option.Tag as PeerInfo;
+            if (peer == null) return;
+            try
+            {
+                Clipboard.SetText(peer.Address);
+                statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
+                statusLabel.Text = "IP " + peer.Address + " copiado.";
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Não foi possível copiar o IP: " + error.Message,
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        // Endereços marcados, em qualquer coluna.
+        private List<string> GetSelectedAddresses()
+        {
+            List<string> addresses = new List<string>();
+            foreach (RadioButton option in DestinationOptions())
+            {
+                if (!option.Checked) continue;
+                PeerInfo peer = option.Tag as PeerInfo;
+                if (peer != null) addresses.Add(peer.Address);
+            }
+            return addresses;
+        }
+
+        // Destinatários marcados, em qualquer coluna.
+        private List<PeerInfo> GetSelectedComputers()
+        {
+            List<PeerInfo> peers = new List<PeerInfo>();
+            foreach (RadioButton option in DestinationOptions())
+            {
+                if (!option.Checked) continue;
+                PeerInfo peer = option.Tag as PeerInfo;
+                if (peer != null) peers.Add(peer);
+            }
+            return peers;
+        }
+
+        // Todos os botões de destinatário, descendo pelas colunas.
+        private List<RadioButton> DestinationOptions()
+        {
+            List<RadioButton> options = new List<RadioButton>();
+            CollectDestinationOptions(computerList, options);
+            return options;
+        }
+
+        private static void CollectDestinationOptions(Control parent, List<RadioButton> options)
+        {
+            if (parent == null) return;
+            foreach (Control child in parent.Controls)
+            {
+                RadioButton option = child as RadioButton;
+                if (option != null)
+                {
+                    options.Add(option);
+                    continue;
+                }
+                CollectDestinationOptions(child, options);
+            }
         }
 
         private void DestinationSelectionChanged(object sender, EventArgs e)
@@ -2661,38 +2798,20 @@ namespace TailMsg
         private void UpdateActionStates()
         {
             sendButton.Enabled = !isSending && GetSelectedComputer() != null;
-            refreshButton.Enabled = !isSending && !isRefreshing;
             if (recordButton != null) recordButton.Enabled = !isSending;
             if (liveMicButton != null) liveMicButton.Enabled = !isSending;
         }
 
         private string GetSelectedAddress()
         {
-            foreach (Control control in computerList.Controls)
-            {
-                RadioButton option = control as RadioButton;
-                if (option != null && option.Checked)
-                {
-                    PeerInfo peer = option.Tag as PeerInfo;
-                    return peer == null ? null : peer.Address;
-                }
-            }
-
-            return null;
+            List<string> addresses = GetSelectedAddresses();
+            return addresses.Count == 0 ? null : addresses[0];
         }
 
         private PeerInfo GetSelectedComputer()
         {
-            foreach (Control control in computerList.Controls)
-            {
-                RadioButton option = control as RadioButton;
-                if (option != null && option.Checked)
-                {
-                    return option.Tag as PeerInfo;
-                }
-            }
-
-            return null;
+            List<PeerInfo> peers = GetSelectedComputers();
+            return peers.Count == 0 ? null : peers[0];
         }
 
         private void MessageBoxKeyDown(object sender, KeyEventArgs e)
@@ -3446,104 +3565,141 @@ namespace TailMsg
                 StopAudioRecording("envio");
             }
 
-            PeerInfo computer = GetSelectedComputer();
+            List<PeerInfo> targets = GetSelectedComputers();
             // A transcrição exibida na caixa é apenas informativa: o que viaja
             // é o áudio (o destinatário transcreve no computador dele).
             string message = messageBoxIsTranscription ? "" : messageBox.Text.Trim();
             ImagePayload image = pendingImage;
             AudioPayload audio = pendingAudio;
 
-            if (computer == null)
+            if (targets.Count == 0)
             {
-                MessageBox.Show(this, "Escolha um computador TailMsg como destino.", "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "Escolha ao menos um computador TailMsg como destino.",
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             if (String.IsNullOrEmpty(message) && image == null && audio == null)
             {
-                MessageBox.Show(this, "Digite a mensagem, cole uma imagem com Ctrl+V ou grave um áudio.", "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "Digite a mensagem, cole uma imagem com Ctrl+V ou grave um áudio.",
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 messageBox.Focus();
                 return;
             }
 
-            if (image != null && !computer.SupportsImages)
+            // Uma recusa vale para todos: evita enviar metade e falhar depois.
+            foreach (PeerInfo target in targets)
             {
-                MessageBox.Show(
-                    this,
-                    "O computador " + computer.Name +
-                    " usa uma versão do TailMsg sem suporte a imagens." +
-                    (message.Length > 0
-                        ? " Somente o texto pode ser enviado."
-                        : " A imagem não será enviada."),
-                    "TailMsg",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                return;
-            }
+                if (image != null && !target.SupportsImages)
+                {
+                    MessageBox.Show(
+                        this,
+                        "O computador " + target.Name +
+                        " usa uma versão do TailMsg sem suporte a imagens." +
+                        (message.Length > 0
+                            ? " Somente o texto pode ser enviado."
+                            : " A imagem não será enviada."),
+                        "TailMsg",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
 
-            if (audio != null && !computer.SupportsAudio)
-            {
-                MessageBox.Show(
-                    this,
-                    "O computador " + computer.Name +
-                    " usa uma versão do TailMsg sem suporte a áudio." +
-                    (message.Length > 0
-                        ? " Somente o texto pode ser enviado."
-                        : " O áudio não será enviado."),
-                    "TailMsg",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                return;
+                if (audio != null && !target.SupportsAudio)
+                {
+                    MessageBox.Show(
+                        this,
+                        "O computador " + target.Name +
+                        " usa uma versão do TailMsg sem suporte a áudio." +
+                        (message.Length > 0
+                            ? " Somente o texto pode ser enviado."
+                            : " O áudio não será enviado."),
+                        "TailMsg",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
             }
 
             isSending = true;
             UpdateActionStates();
             statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
-            statusLabel.Text = "Enviando para " + computer.Name + " (" + computer.Address + ")...";
+            statusLabel.Text = targets.Count == 1
+                ? "Enviando para " + targets[0].Name + " (" + targets[0].Address + ")..."
+                : "Enviando para " + targets.Count + " computadores...";
 
-            // Texto, imagem e áudio viajam como mensagens separadas, nesta
-            // ordem, para o destinatário usar o botão que quiser.
+            List<PeerInfo> recipients = targets;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 bool sentText = false;
                 bool sentImage = false;
                 bool sentAudio = false;
-                string sentTextId = "";
-                string sentImageId = "";
-                string sentAudioId = "";
                 string failure = "";
 
-                if (message.Length > 0)
+                // Texto, imagem e áudio viajam como mensagens separadas, nesta
+                // ordem, para o destinatário usar o botão que quiser.
+                foreach (PeerInfo computer in recipients)
                 {
-                    MessageSendResult textResult = MessageSender.Send(
-                        computer,
-                        localComputerName,
-                        message);
-                    sentText = textResult.Success;
-                    sentTextId = textResult.OperationId;
-                    if (!textResult.Success) failure = textResult.ErrorMessage;
-                }
+                    string textId = "";
+                    string imageId = "";
+                    string audioId = "";
 
-                if (failure.Length == 0 && image != null)
-                {
-                    MessageSendResult imageResult = MessageSender.SendImage(
-                        computer,
-                        localComputerName,
-                        image);
-                    sentImage = imageResult.Success;
-                    sentImageId = imageResult.OperationId;
-                    if (!imageResult.Success) failure = imageResult.ErrorMessage;
-                }
+                    if (message.Length > 0)
+                    {
+                        MessageSendResult textResult = MessageSender.Send(
+                            computer,
+                            localComputerName,
+                            message);
+                        if (textResult.Success)
+                        {
+                            sentText = true;
+                            textId = textResult.OperationId;
+                        }
+                        else if (failure.Length == 0)
+                        {
+                            failure = textResult.ErrorMessage;
+                        }
+                    }
 
-                if (failure.Length == 0 && audio != null)
-                {
-                    MessageSendResult audioResult = MessageSender.SendAudio(
+                    if (image != null)
+                    {
+                        MessageSendResult imageResult = MessageSender.SendImage(
+                            computer,
+                            localComputerName,
+                            image);
+                        if (imageResult.Success)
+                        {
+                            sentImage = true;
+                            imageId = imageResult.OperationId;
+                        }
+                        else if (failure.Length == 0)
+                        {
+                            failure = imageResult.ErrorMessage;
+                        }
+                    }
+
+                    if (audio != null)
+                    {
+                        MessageSendResult audioResult = MessageSender.SendAudio(
+                            computer,
+                            localComputerName,
+                            audio);
+                        if (audioResult.Success)
+                        {
+                            sentAudio = true;
+                            audioId = audioResult.OperationId;
+                        }
+                        else if (failure.Length == 0)
+                        {
+                            failure = audioResult.ErrorMessage;
+                        }
+                    }
+
+                    RegisterSentMessages(
                         computer,
-                        localComputerName,
-                        audio);
-                    sentAudio = audioResult.Success;
-                    sentAudioId = audioResult.OperationId;
-                    if (!audioResult.Success) failure = audioResult.ErrorMessage;
+                        sentText && message.Length > 0, textId, message,
+                        sentImage && image != null, imageId, image,
+                        sentAudio && audio != null, audioId, audio);
                 }
 
                 TryBeginInvoke(delegate
@@ -3563,17 +3719,12 @@ namespace TailMsg
                     }
 
                     UpdateActionStates();
-                    RegisterSentMessages(
-                        computer,
-                        sentText, sentTextId, message,
-                        sentImage, sentImageId, image,
-                        sentAudio, sentAudioId, audio);
 
                     if (failure.Length == 0)
                     {
                         statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                         statusLabel.Text = DescribeDelivery(
-                            computer.Name,
+                            DescribeTargets(recipients),
                             sentText,
                             sentImage,
                             sentAudio);
@@ -3582,11 +3733,21 @@ namespace TailMsg
                     else
                     {
                         statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
-                        statusLabel.Text = "Falha ao enviar para " + computer.Name + ".";
-                        MessageBox.Show(this, failure, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        statusLabel.Text = "Falha ao enviar para " +
+                            DescribeTargets(recipients) + ".";
+                        MessageBox.Show(this, failure, "TailMsg",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 });
             });
+        }
+
+        // Nome curto do conjunto de destinatários, para a barra de status.
+        private static string DescribeTargets(List<PeerInfo> targets)
+        {
+            if (targets == null || targets.Count == 0) return "nenhum computador";
+            if (targets.Count == 1) return targets[0].Name;
+            return targets[0].Name + " e mais " + (targets.Count - 1);
         }
 
         // Cada mensagem entregue entra no histórico como enviada: texto em
@@ -3635,6 +3796,7 @@ namespace TailMsg
                     who + ": [imagem " + ImageTransfer.DescribeBytes(size) + "] [" + stamp + "]",
                     image.PngBytes,
                     HistoryStore.MediaPath(file));
+                row.Address = address;
                 row.Seq = seq;
                 row.OperationId = imageId;
                 row.Sent = true;
@@ -3658,6 +3820,7 @@ namespace TailMsg
                     who + ": [áudio " + FormatDuration(audio.DurationMilliseconds / 1000) + "] [" + stamp + "]",
                     audio,
                     audioId);
+                row.Address = address;
                 row.Seq = seq;
                 row.OperationId = audioId;
                 row.Sent = true;

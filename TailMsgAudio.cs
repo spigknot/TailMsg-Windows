@@ -2103,6 +2103,10 @@ namespace TailMsg
                     foreach (Control control in Snapshot())
                     {
                         control.Width = width;
+                        // O texto enviado precisa se realinhar à direita sempre
+                        // que a largura muda (inclusive ao abrir a barra).
+                        InboxTextRow textRow = control as InboxTextRow;
+                        if (textRow != null) textRow.LayoutRow();
                         control.Location = new Point(0, top);
                         top += control.Height + 2;
                     }
@@ -2163,6 +2167,7 @@ namespace TailMsg
             label.ForeColor = sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
             label.Text = who + ": " + text + " [" + time + "]";
             Controls.Add(label);
+            Resize += delegate { LayoutRow(); };
             LayoutRow();
         }
 
@@ -2171,8 +2176,14 @@ namespace TailMsg
             get { return label.Text; }
         }
 
+        private bool layingOutRow;
+
         public void LayoutRow()
         {
+            if (layingOutRow) return;
+            layingOutRow = true;
+            try
+            {
             int available = Parent == null ? Width : Parent.ClientSize.Width;
             available = Math.Max(160, available - 8);
             label.MaximumSize = new Size(available, 0);
@@ -2180,6 +2191,11 @@ namespace TailMsg
             label.Location = new Point(left, 0);
             Width = available;
             Height = Math.Max(18, label.Height + 2);
+            }
+            finally
+            {
+                layingOutRow = false;
+            }
         }
     }
 

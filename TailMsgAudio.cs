@@ -1774,7 +1774,9 @@ namespace TailMsg
         public static void Draw(Graphics graphics, Control target, int reserveRight)
         {
             if (graphics == null || target == null) return;
-            int width = target.ClientSize.Width - Math.Max(0, reserveRight);
+            // 1 px a mais à direita: sem isso a linha direita fica escondida
+            // atrás da barra de rolagem / do painel de conteúdo.
+            int width = target.ClientSize.Width - Math.Max(0, reserveRight) - 1;
             int height = target.ClientSize.Height;
             if (width <= 1 || height <= 1) return;
             using (Pen pen = new Pen(LineColor))
@@ -1832,7 +1834,8 @@ namespace TailMsg
             viewport.Controls.Add(content);
 
             scrollBar = new VScrollBar();
-            scrollBar.Dock = DockStyle.Right;
+            // Sem Dock: a barra é posicionada ocupando a altura inteira do
+            // painel, para não sobrar 1 px branco acima e abaixo dela.
             scrollBar.Width = SystemInformation.VerticalScrollBarWidth;
             scrollBar.SmallChange = 24;
             scrollBar.Visible = false;
@@ -2120,6 +2123,9 @@ namespace TailMsg
                 {
                     bool visibleBefore = scrollBar.Visible;
                     int width = ContentWidth;
+                    // O conteúdo precisa da largura do viewport para o texto
+                    // enviado poder encostar na direita.
+                    content.Width = Math.Max(120, viewport.ClientSize.Width);
                     int top = 0;
                     foreach (Control control in Snapshot())
                     {
@@ -2153,6 +2159,20 @@ namespace TailMsg
             {
                 layingOut = false;
             }
+            PlaceScrollBar();
+        }
+
+        // A barra ocupa a altura inteira e a borda direita é desenhada 1 px
+        // antes dela, para o contorno não sumir atrás da barra.
+        private void PlaceScrollBar()
+        {
+            if (scrollBar == null) return;
+            int width = scrollBar.Width;
+            scrollBar.Bounds = new Rectangle(
+                Math.Max(0, ClientSize.Width - width),
+                0,
+                width,
+                ClientSize.Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -2203,8 +2223,12 @@ namespace TailMsg
             layingOutRow = true;
             try
             {
-            int available = Parent == null ? Width : Parent.ClientSize.Width;
-            available = Math.Max(160, available - 8);
+            // A largura vem da própria linha (o layout do histórico já a
+            // definiu), então a enviada encosta na direita da linha.
+            int available = Width > 0
+                ? Width
+                : (Parent == null ? 160 : Parent.ClientSize.Width - 8);
+            available = Math.Max(160, available);
             label.MaximumSize = new Size(available, 0);
             int left = Sent ? Math.Max(0, available - label.Width) : 0;
             label.Location = new Point(left, 0);

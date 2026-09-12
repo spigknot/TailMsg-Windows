@@ -1802,6 +1802,9 @@ namespace TailMsg
         private Font rowFont;
         private readonly VScrollBar scrollBar;
         private readonly Panel viewport;
+        // Recorte interno: mantém o conteúdo dentro da margem de 1 px, para as
+        // linhas (brancas) nunca cobrirem as bordas de cima e de baixo ao rolar.
+        private readonly Panel clip;
         // Painel que guarda as linhas: a rolagem só o desloca (nada de refazer
         // o layout de todas as linhas a cada passo do arrasto).
         private readonly Panel content;
@@ -1835,10 +1838,15 @@ namespace TailMsg
             viewport.Padding = new Padding(1);
             Controls.Add(viewport);
 
+            clip = new Panel();
+            clip.Location = new Point(1, 1);
+            clip.BackColor = Color.White;
+            viewport.Controls.Add(clip);
+
             content = new Panel();
             content.Location = new Point(0, 0);
             content.BackColor = Color.White;
-            viewport.Controls.Add(content);
+            clip.Controls.Add(content);
 
             scrollBar = new VScrollBar();
             // Dock à direita: o painel de conteúdo (Dock=Fill) respeita o
@@ -2111,14 +2119,14 @@ namespace TailMsg
         {
             if (content == null || scrollBar == null) return;
             int offset = scrollBar.Visible ? scrollBar.Value : 0;
-            int top = 1 - offset;
+            int top = -offset;
             if (content.Top != top)
             {
                 content.Top = top;
             }
-            if (content.Left != 1)
+            if (content.Left != 0)
             {
-                content.Left = 1;
+                content.Left = 0;
             }
         }
 
@@ -2128,7 +2136,7 @@ namespace TailMsg
         // remoção ou redimensionamento). A rolagem em si não passa por aqui.
         private void LayoutRows()
         {
-            if (layingOut || viewport == null || content == null || scrollBar == null) return;
+            if (layingOut || viewport == null || clip == null || content == null || scrollBar == null) return;
             layingOut = true;
             try
             {
@@ -2138,7 +2146,12 @@ namespace TailMsg
                     int width = ContentWidth;
                     // O conteúdo precisa da largura do viewport para o texto
                     // enviado poder encostar na direita.
-                    content.Width = Math.Max(120, viewport.ClientSize.Width - 2);
+                    clip.Bounds = new Rectangle(
+                        1,
+                        1,
+                        Math.Max(1, viewport.ClientSize.Width - 2),
+                        Math.Max(1, viewport.ClientSize.Height - 2));
+                    content.Width = Math.Max(120, clip.ClientSize.Width);
                     int top = 0;
                     foreach (Control control in Snapshot())
                     {

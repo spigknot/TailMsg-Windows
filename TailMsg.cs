@@ -3835,7 +3835,6 @@ namespace TailMsg
         private readonly Bitmap imageThumbnail;
         private readonly string imageThumbnailError;
         private Panel replyAttachmentBorder;
-        private Panel replyAudioBorder;
         private PictureBox replyAttachmentBox;
         private Label replyAttachmentLabel;
         private Label replyLabel;
@@ -3845,6 +3844,8 @@ namespace TailMsg
         private int baseTransparencyButtonTop;
         private int basePopupHeight;
         private bool replySupportsImages;
+        private bool replySupportsAudio;
+        private int replyCapabilities;
         private AudioTrackPanel audioPanel;
         private bool transcriptionInProgress;
         private Button retryTranscriptionButton;
@@ -3859,9 +3860,9 @@ namespace TailMsg
         private bool replyRecordingLive;
         private bool replyPaused;
         private AudioPayload replyAudio;
-        private TextBox replyAudioBox;
-        private Label replyAudioLabel;
-        private Button replyAudioRemoveButton;
+        private AudioTrackPanel replyAudioPanel;
+        private Panel replyAudioHolder;
+        private Panel bodyPanel;
         private string replyCommittedText = "";
         private string replyDraftText = "";
         private int replyCommitOffset;
@@ -4308,35 +4309,7 @@ namespace TailMsg
             replyLiveMicButton.Click += delegate { ToggleReplyLiveMicrophone(); };
             body.Controls.Add(replyLiveMicButton);
 
-            replyAudioBox = new TextBox();
-            replyAudioBox.Multiline = true;
-            replyAudioBox.ReadOnly = true;
-            replyAudioBox.ScrollBars = ScrollBars.Vertical;
-            replyAudioBox.Font = new Font("Segoe UI", 9F);
-            replyAudioBox.BackColor = Color.White;
-            replyAudioBox.Visible = false;
-            replyAudioBox.MouseDown += ActivateForInteraction;
-            replyAudioBorder = new Panel();
-            replyAudioBorder.BackColor = Color.FromArgb(107, 114, 128);
-            replyAudioBorder.Padding = new Padding(1);
-            replyAudioBorder.Visible = false;
-            replyAudioBorder.Controls.Add(replyAudioBox);
-            replyAudioBox.Dock = DockStyle.Fill;
-            body.Controls.Add(replyAudioBorder);
-
-            replyAudioRemoveButton = new Button();
-            replyAudioRemoveButton.Text = "Remover";
-            replyAudioRemoveButton.Size = new Size(78, 22);
-            replyAudioRemoveButton.BackColor = Color.FromArgb(55, 65, 81);
-            replyAudioRemoveButton.ForeColor = Color.White;
-            replyAudioRemoveButton.FlatStyle = FlatStyle.Flat;
-            replyAudioRemoveButton.FlatAppearance.BorderSize = 0;
-            replyAudioRemoveButton.Cursor = Cursors.Hand;
-            replyAudioRemoveButton.Visible = false;
-            replyAudioRemoveButton.Click += delegate { ClearReplyAudio(); };
-            body.Controls.Add(replyAudioRemoveButton);
-
-            UpdateReplyRecordButtons();
+            UpdateReplyRecordButtons();            UpdateReplyRecordButtons();
 
             if (hasAudio) StartTranscription();
 
@@ -4351,19 +4324,25 @@ namespace TailMsg
         // certamente aceita; nos outros casos vale a descoberta do peer.
         private void RefreshReplyCapability()
         {
+            // Capacidades anunciadas pelo remetente, somadas ao que já sabemos
+            // por ele ter nos enviado algo: quem mandou áudio aceita áudio.
+            int capabilities = 0;
+            if (PeerCapabilityLookup != null)
+            {
+                capabilities = PeerCapabilityLookup(remoteAddress);
+            }
             if (imageMessage != null)
             {
-                replySupportsImages = true;
+                capabilities |= TailMsgProtocol.CapabilityImage;
             }
-            else
+            if (audioMessage != null)
             {
-                int capabilities = 0;
-                if (PeerCapabilityLookup != null)
-                {
-                    capabilities = PeerCapabilityLookup(remoteAddress);
-                }
-                replySupportsImages = TailMsgProtocol.SupportsImages(capabilities);
+                capabilities |= TailMsgProtocol.CapabilityAudio;
             }
+
+            replyCapabilities = capabilities;
+            replySupportsImages = TailMsgProtocol.SupportsImages(capabilities);
+            replySupportsAudio = TailMsgProtocol.SupportsAudio(capabilities);
             UpdateReplyLabel();
         }
 
@@ -4652,9 +4631,7 @@ namespace TailMsg
             replyGeneration++;
             replyCommitBusy = false;
             UpdateReplyRecordButtons();
-            ShowReplyAudioPanel(live
-                ? "Gravando (transcrição ao vivo)..."
-                : "Gravando...");
+
 
             if (replyRecordingTimer == null)
             {
@@ -4670,11 +4647,8 @@ namespace TailMsg
             if (!replyRecording || replyRecorder == null) return;
 
             int seconds = (int)Math.Round(replyRecorder.ElapsedSeconds);
-            string partial = replyRecordingLive ? ReplyTranscriptionText() : "";
-            ShowReplyAudioPanel("Gravando " + (seconds / 60) + ":" +
-                (seconds % 60).ToString("00") +
-                (replyPaused ? " (pausado)" : "") +
-                (partial.Length > 0 ? "  " + partial : ""));
+            string partial = ReplyTranscriptionText();
+            if (partial.Length > 0) SetReplyTranscriptionText(partial);
 
             if (replyRecorder.LimitReached)
             {
@@ -4704,7 +4678,7 @@ namespace TailMsg
 
             if (payload == null)
             {
-                HideReplyAudioPanel();
+                HideReplyAudioPlayer();
                 return;
             }
 
@@ -4738,8 +4712,7 @@ namespace TailMsg
             if (payload == null || payload.WavBytes == null) return;
             byte[] wavBytes = payload.WavBytes;
             string operationId = TailMsgDiagnostics.CreateOperationId();
-            ShowReplyAudioPanel("Áudio " + (payload.DurationMilliseconds / 1000) +
-                "s — transcrevendo...");
+            SetReplyTranscriptionText("Transcrevendo...");
 
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -4761,11 +4734,6 @@ namespace TailMsg
                             TranscriptionCache.Remember(operationId, text);
                             SetReplyTranscriptionText(text);
                         }
-                        ShowReplyAudioPanel(ok
-                            ? "Áudio " + (payload.DurationMilliseconds / 1000) +
-                                "s — " + text
-                            : "Áudio " + (payload.DurationMilliseconds / 1000) +
-                                "s — não foi possível transcrever: " + error);
                     });
                 }
                 catch (InvalidOperationException) { }
@@ -4855,16 +4823,6 @@ namespace TailMsg
                             replyDraftText = text;
                         }
                         SetReplyTranscriptionText(ReplyTranscriptionText());
-                        if (replyRecording)
-                        {
-                            ShowReplyAudioPanel("Gravando — " + ReplyTranscriptionText());
-                        }
-                        else if (replyAudio != null)
-                        {
-                            ShowReplyAudioPanel("Áudio " +
-                                (replyAudio.DurationMilliseconds / 1000) + "s — " +
-                                ReplyTranscriptionText());
-                        }
                     });
                 }
                 catch (InvalidOperationException) { }
@@ -4883,9 +4841,7 @@ namespace TailMsg
         private void SetReplyAudio(AudioPayload payload)
         {
             replyAudio = payload;
-            ApplyReplyLayout();
-            ShowReplyAudioPanel("Áudio " + (payload.DurationMilliseconds / 1000) +
-                "s anexado.");
+            ShowReplyAudioPlayer();
         }
 
         private void ClearReplyAudio()
@@ -4896,8 +4852,7 @@ namespace TailMsg
             replyDraftText = "";
             replyBoxIsTranscription = false;
             replyBox.SetProgrammaticText("");
-            HideReplyAudioPanel();
-            ApplyReplyLayout();
+            HideReplyAudioPlayer();
         }
 
         private void SetReplyTranscriptionText(string transcription)
@@ -4908,21 +4863,55 @@ namespace TailMsg
             replyBox.SetProgrammaticText(text);
         }
 
-        private void ShowReplyAudioPanel(string text)
+        // O áudio gravado para a resposta aparece como o MESMO player do áudio
+        // recebido (timeline com play/pause, sobre o fundo da janela).
+        private void ShowReplyAudioPlayer()
         {
-            if (replyAudioBox == null) return;
-            replyAudioBox.Text = text == null ? "" : text;
-            replyAudioBorder.Visible = true;
-            replyAudioRemoveButton.Visible = true;
+            if (replyAudio == null) return;
+            HideReplyAudioPlayer();
+
+            AudioTrackPanel panel = new AudioTrackPanel(replyAudio, false);
+            panel.UsePopupColors(30);
+            panel.Location = new Point(5, 0);
+            panel.Size = new Size(Math.Max(120, replyBox.Width), 40);
+            panel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            panel.PlaybackFailed += delegate(object sender, EventArgs e)
+            {
+                PlaybackFailedEventArgs failure = e as PlaybackFailedEventArgs;
+                MessageBox.Show(
+                    this,
+                    failure == null
+                        ? "Não foi possível tocar o áudio."
+                        : failure.ErrorMessage,
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            };
+            replyAudioPanel = panel;
+
+            Panel holder = new Panel();
+            holder.Name = "replyAudioHolder";
+            holder.BackColor = Color.FromArgb(31, 41, 55);
+            holder.Padding = new Padding(0);
+            holder.Controls.Add(panel);
+            replyAudioHolder = holder;
+            bodyPanel.Controls.Add(holder);
             ApplyReplyLayout();
         }
 
-        private void HideReplyAudioPanel()
+        private void HideReplyAudioPlayer()
         {
-            if (replyAudioBorder == null) return;
-            replyAudioBorder.Visible = false;
-            replyAudioRemoveButton.Visible = false;
-            if (replyAudioBox != null) replyAudioBox.Text = "";
+            if (replyAudioPanel != null)
+            {
+                replyAudioPanel.StopPlayback();
+                replyAudioPanel.Dispose();
+                replyAudioPanel = null;
+            }
+            if (replyAudioHolder != null)
+            {
+                replyAudioHolder.Dispose();
+                replyAudioHolder = null;
+            }
             ApplyReplyLayout();
         }
 
@@ -4946,23 +4935,17 @@ namespace TailMsg
                 replyAttachmentBorder.Visible = false;
             }
 
-            bool audioVisible = replyAudio != null || replyRecording;
-            if (audioVisible && replyAudioBorder != null)
+            bool audioVisible = replyAudio != null && replyAudioHolder != null;
+            if (audioVisible)
             {
-                replyAudioBorder.Location = new Point(5, top);
-                replyAudioBorder.Size = new Size(
-                    Math.Max(120, replyBox.Width),
-                    AttachmentBandHeight - 6);
-                replyAudioBorder.Visible = true;
-                replyAudioRemoveButton.Location = new Point(
-                    Math.Max(60, replyAudioBorder.Width - 84),
-                    Math.Max(2, (replyAudioBorder.Height - 22) / 2));
-                replyAudioRemoveButton.BringToFront();
-                top += AttachmentBandHeight;
-            }
-            else if (replyAudioBorder != null)
-            {
-                replyAudioBorder.Visible = false;
+                replyAudioHolder.Location = new Point(5, top);
+                replyAudioHolder.Size = new Size(Math.Max(120, replyBox.Width), 40);
+                replyAudioHolder.Visible = true;
+                if (replyAudioPanel != null)
+                {
+                    replyAudioPanel.Size = replyAudioHolder.Size;
+                }
+                top += 46;
             }
 
             int toolsTop = top + 3;
@@ -5116,6 +5099,17 @@ namespace TailMsg
             }
 
             RefreshReplyCapability();
+            if (replyAudioPayload != null && !replySupportsAudio)
+            {
+                MessageBox.Show(
+                    this,
+                    "O computador " + senderName +
+                    " usa uma versão do TailMsg sem suporte a áudio.",
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
             if (attachment != null && !replySupportsImages)
             {
                 MessageBox.Show(
@@ -5138,9 +5132,7 @@ namespace TailMsg
                 peer.Name = senderName;
                 peer.Address = remoteAddress;
                 peer.Port = NetworkService.TcpPort;
-                peer.Capabilities = replySupportsImages
-                    ? TailMsgProtocol.CapabilityImage
-                    : 0;
+                peer.Capabilities = replyCapabilities;
 
                 // Texto e imagem viajam separados, como no envio principal.
                 bool sentText = false;

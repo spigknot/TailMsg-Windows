@@ -1882,6 +1882,19 @@ namespace TailMsg
             get { return viewport == null ? ClientSize.Height : viewport.ClientSize.Height; }
         }
 
+        // Formato das linhas: recebida "19:21, LUIZ -> mensagem" e enviada
+        // "mensagem -> LUIZ, 19:22". A hora fica sempre em HH:mm.
+        internal static string FormatLine(string who, string body, string time, bool sent)
+        {
+            string hora = String.IsNullOrEmpty(time) ? "" :
+                (time.Length >= 5 ? time.Substring(0, 5) : time);
+            string nome = who ?? "";
+            string conteudo = body ?? "";
+            return sent
+                ? conteudo + " -> " + nome + ", " + hora
+                : hora + ", " + nome + " -> " + conteudo;
+        }
+
         // Texto do histórico: recebida alinhada à esquerda, enviada à direita.
         public InboxTextRow AppendMessage(
             string who,
@@ -2150,14 +2163,14 @@ namespace TailMsg
                 for (int pass = 0; pass < 3; pass++)
                 {
                     bool visibleBefore = scrollBar.Visible;
-                    int width = ContentWidth;
-                    // O conteúdo precisa da largura do viewport para o texto
-                    // enviado poder encostar na direita.
                     clip.Bounds = new Rectangle(
                         1,
                         1,
                         Math.Max(1, viewport.ClientSize.Width - 2),
                         Math.Max(1, viewport.ClientSize.Height - 2));
+                    // Largura cheia do recorte: a enviada encosta na direita na
+                    // mesma medida em que a recebida encosta na esquerda.
+                    int width = Math.Max(120, clip.ClientSize.Width);
                     content.Width = Math.Max(120, clip.ClientSize.Width);
                     int top = 0;
                     foreach (Control control in Snapshot())
@@ -2218,7 +2231,7 @@ namespace TailMsg
             label.Font = font;
             label.AutoSize = true;
             label.ForeColor = sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
-            label.Text = who + ": " + text + " [" + time + "]";
+            label.Text = InboxPanel.FormatLine(who, text, time, sent);
             Controls.Add(label);
             Resize += delegate { LayoutRow(); };
             LayoutRow();

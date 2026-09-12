@@ -3859,7 +3859,7 @@ namespace TailMsg
             bool sentImage, string imageId, ImagePayload image,
             bool sentAudio, string audioId, AudioPayload audio)
         {
-            string stamp = DateTime.Now.ToString("HH:mm:ss");
+            string stamp = DateTime.Now.ToString("HH:mm");
             string who = computer == null ? "?" : computer.Name;
             string address = computer == null ? "" : computer.Address;
 
@@ -3894,7 +3894,11 @@ namespace TailMsg
                     OperationId = imageId
                 });
                 InboxImageRow row = inboxBox.AppendImage(
-                    who + ": [imagem " + ImageTransfer.DescribeBytes(size) + "] [" + stamp + "]",
+                    InboxPanel.FormatLine(
+                        who,
+                        "[imagem " + ImageTransfer.DescribeBytes(size) + "]",
+                        stamp,
+                        true),
                     image.PngBytes,
                     HistoryStore.MediaPath(file));
                 row.Address = address;
@@ -3918,7 +3922,11 @@ namespace TailMsg
                     OperationId = audioId
                 });
                 InboxAudioRow row = inboxBox.AppendAudio(
-                    who + ": [áudio " + FormatDuration(audio.DurationMilliseconds / 1000) + "] [" + stamp + "]",
+                    InboxPanel.FormatLine(
+                        who,
+                        "[áudio " + FormatDuration(audio.DurationMilliseconds / 1000) + "]",
+                        stamp,
+                        true),
                     audio,
                     audioId);
                 row.Address = address;
@@ -3993,7 +4001,7 @@ namespace TailMsg
                     e.Fingerprint,
                     0,
                     "");
-                string textStamp = DateTime.Now.ToString("HH:mm:ss");
+                string textStamp = DateTime.Now.ToString("HH:mm");
                 long textSeq = HistoryStore.Append(new HistoryEntry
                 {
                     Kind = "text",
@@ -4077,10 +4085,13 @@ namespace TailMsg
 
                 // O histórico mostra o resumo e um botão que abre a imagem
                 // recebida no aplicativo padrão do Windows.
-                string imageStamp = DateTime.Now.ToString("HH:mm:ss");
+                string imageStamp = DateTime.Now.ToString("HH:mm");
                 long imageSize = e.ImageBytes == null ? 0 : e.ImageBytes.Length;
-                string imagePrefix = e.SenderName + ": [imagem " +
-                    ImageTransfer.DescribeBytes(imageSize) + "] [" + imageStamp + "]";
+                string imagePrefix = InboxPanel.FormatLine(
+                    e.SenderName,
+                    "[imagem " + ImageTransfer.DescribeBytes(imageSize) + "]",
+                    imageStamp,
+                    false);
                 string imageFile = HistoryStore.SaveMedia(e.ImageBytes, ".png");
                 long imageSeq = HistoryStore.Append(new HistoryEntry
                 {
@@ -4262,10 +4273,13 @@ namespace TailMsg
                 AudioPayload inboxAudio = new AudioPayload();
                 inboxAudio.WavBytes = e.AudioBytes;
                 inboxAudio.DurationMilliseconds = e.DurationMilliseconds;
-                string audioStamp = DateTime.Now.ToString("HH:mm:ss");
+                string audioStamp = DateTime.Now.ToString("HH:mm");
                 InboxAudioRow audioRow = inboxBox.AppendAudio(
-                    e.SenderName + ": [áudio " +
-                    FormatDuration(e.DurationMilliseconds / 1000) + "] [" + audioStamp + "]",
+                    InboxPanel.FormatLine(
+                        e.SenderName,
+                        "[áudio " + FormatDuration(e.DurationMilliseconds / 1000) + "]",
+                        audioStamp,
+                        false),
                     inboxAudio,
                     e.OperationId);
                 audioRow.Address = e.RemoteAddress;
@@ -4374,7 +4388,11 @@ namespace TailMsg
                 if (isImage)
                 {
                     InboxImageRow row = inboxBox.AppendImage(
-                        entry.Sender + ": [imagem " + ImageTransfer.DescribeBytes(entry.Size) + "] [" + entry.Time + "]",
+                        InboxPanel.FormatLine(
+                            entry.Sender,
+                            "[imagem " + ImageTransfer.DescribeBytes(entry.Size) + "]",
+                            entry.Time,
+                            sent),
                         exists ? File.ReadAllBytes(path) : null,
                         exists ? path : null);
                     row.Address = entry.Address;
@@ -4390,7 +4408,11 @@ namespace TailMsg
                 payload.WavBytes = File.ReadAllBytes(path);
                 payload.DurationMilliseconds = entry.DurationMilliseconds;
                 InboxAudioRow audioRow = inboxBox.AppendAudio(
-                    entry.Sender + ": [áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "] [" + entry.Time + "]",
+                    InboxPanel.FormatLine(
+                        entry.Sender,
+                        "[áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "]",
+                        entry.Time,
+                        sent),
                     payload,
                     entry.OperationId);
                 audioRow.Address = entry.Address;

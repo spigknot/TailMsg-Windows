@@ -1520,13 +1520,10 @@ namespace TailMsg
         private TableLayoutPanel contentLayout;
         private ImagePayload pendingImage;
         private Bitmap pendingImageThumbnail;
-        private Panel audioPreviewBorder;
         private AudioTrackPanel audioPreviewPanel;
         private IconButton recordButton;          // microfone branco
         private IconButton liveMicButton;         // microfone vermelho
         private IconButton pauseButton;           // pausa/play do meio
-        private TextBox audioTranscriptionBox;
-        private Panel audioTranscriptionBorder;
         private WaveRecorder recorder;
         private System.Windows.Forms.Timer recordingTimer;
         private AudioPayload pendingAudio;
@@ -1914,38 +1911,9 @@ namespace TailMsg
                     Math.Max(20, imagePreviewPanel.ClientSize.Height - 6));
             };
 
-            // Linha do áudio gravado: timeline em cima e a transcrição logo
-            // abaixo, ainda no remetente (antes de enviar).
-            Panel audioBorder = new Panel();
-            audioBorder.Dock = DockStyle.Fill;
-            audioBorder.Padding = new Padding(1);
-            audioBorder.BackColor = Color.FromArgb(209, 213, 219);
-            audioBorder.Visible = false;
-            layout.Controls.Add(audioBorder, 0, 7);
-            audioPreviewBorder = audioBorder;
-
-            // A transcrição fica em um painel com o MESMO contorno e as MESMAS
-            // margens do player (1 px de cada lado): sem o painel, o fundo cinza
-            // da faixa aparecia como um "L" grosso à esquerda e acima da caixa.
-            audioTranscriptionBorder = new Panel();
-            audioTranscriptionBorder.BackColor = Color.FromArgb(209, 213, 219);
-            audioTranscriptionBorder.Padding = new Padding(1);
-            audioTranscriptionBorder.Location = new Point(1, 59);
-            audioTranscriptionBorder.Size = new Size(300, 56);
-            audioTranscriptionBorder.Anchor =
-                AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            audioTranscriptionBorder.Visible = false;
-            audioPreviewBorder.Controls.Add(audioTranscriptionBorder);
-
-            audioTranscriptionBox = new TextBox();
-            audioTranscriptionBox.Multiline = true;
-            audioTranscriptionBox.ReadOnly = true;
-            audioTranscriptionBox.ScrollBars = ScrollBars.Vertical;
-            audioTranscriptionBox.Font = new Font("Segoe UI", 9F);
-            audioTranscriptionBox.BackColor = Color.White;
-            audioTranscriptionBox.BorderStyle = BorderStyle.None;
-            audioTranscriptionBox.Dock = DockStyle.Fill;
-            audioTranscriptionBorder.Controls.Add(audioTranscriptionBox);
+            // Linha do áudio gravado: a timeline entra direto no painel (sem
+            // quadro branco) quando o áudio é anexado. A transcrição aparece na
+            // própria caixa onde a mensagem é digitada.
 
             Label senderLabel = new Label();
             senderLabel.Dock = DockStyle.Fill;
@@ -2944,12 +2912,12 @@ namespace TailMsg
                 // A caixa da transcrição precisa estar visível durante a
                 // gravação: os trechos vão aparecendo nela em tempo real.
                 ShowAudioPreview(true);
-                ShowAudioTranscription("Transcrevendo ao vivo... aguarde o primeiro trecho.");
+                SetAudioTranscriptionText("");
+                ShowAudioStatus("Transcrevendo ao vivo... aguarde o primeiro trecho.", false);
             }
             else
             {
                 ShowAudioPreview(true);
-                ShowAudioTranscription("");
             }
 
             UpdateRecordButtons();
@@ -3062,7 +3030,6 @@ namespace TailMsg
             {
                 statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
                 statusLabel.Text = "A gravação ficou curta demais e foi descartada.";
-                ShowAudioTranscription("");
                 return;
             }
 
@@ -3089,11 +3056,9 @@ namespace TailMsg
             ClearAudioPreviewPanel();
 
             AudioTrackPanel panel = new AudioTrackPanel(audio, true);
-            panel.Location = new Point(1, 1);
-            panel.Size = new Size(
-                Math.Max(120, audioPreviewBorder.ClientSize.Width - 2),
-                54);
-            panel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            panel.Dock = DockStyle.Fill;
+            // Fundo natural do painel: sem quadro branco em volta.
+            panel.BackColor = Color.FromArgb(245, 247, 250);
             panel.RemoveRequested += delegate { ClearPendingAudio(); };
             panel.PlaybackFailed += delegate(object sender, EventArgs e)
             {
@@ -3104,8 +3069,7 @@ namespace TailMsg
                     : failure.ErrorMessage;
             };
             audioPreviewPanel = panel;
-            audioPreviewBorder.Controls.Add(panel);
-            panel.BringToFront();
+            contentLayout.Controls.Add(panel, 0, 7);
 
             ShowAudioPreview(true);
             UpdateActionStates();
@@ -3120,7 +3084,6 @@ namespace TailMsg
             pendingAudio = null;
             ShowAudioPreview(false);
             ClearAudioPreviewPanel();
-            ShowAudioTranscription("");
             messageBoxIsTranscription = false;
             UpdateActionStates();
         }
@@ -3131,21 +3094,19 @@ namespace TailMsg
             AudioTrackPanel panel = audioPreviewPanel;
             audioPreviewPanel = null;
             panel.StopPlayback();
-            if (audioPreviewBorder != null &&
-                audioPreviewBorder.Controls.Contains(panel))
+            if (contentLayout != null && contentLayout.Controls.Contains(panel))
             {
-                audioPreviewBorder.Controls.Remove(panel);
+                contentLayout.Controls.Remove(panel);
             }
             panel.Dispose();
         }
 
         private void ShowAudioPreview(bool visible)
         {
-            if (audioPreviewBorder != null) audioPreviewBorder.Visible = visible;
+            // Só a linha do áudio: a timeline fica sobre o fundo do painel.
             if (contentLayout != null && contentLayout.RowStyles.Count > 7)
             {
-                // A faixa cresce para caber a transcrição do remetente.
-                contentLayout.RowStyles[7].Height = visible ? 117F : 0F;
+                contentLayout.RowStyles[7].Height = visible ? 58F : 0F;
             }
         }
 
@@ -3162,19 +3123,16 @@ namespace TailMsg
             messageBox.SetProgrammaticText(text);
         }
 
-        private void ShowAudioTranscription(string text)
+        // Avisos da transcrição saem no status; o texto transcrito em si vai
+        // para a caixa onde a mensagem é digitada.
+        private void ShowAudioStatus(string text, bool isError)
         {
-            if (audioTranscriptionBox == null) return;
-            string value = text == null ? "" : text;
-            audioTranscriptionBox.Text = value;
-            bool visible = value.Length > 0;
-            audioTranscriptionBox.Visible = visible;
-            if (audioTranscriptionBorder != null)
-            {
-                audioTranscriptionBorder.Visible = visible;
-            }
-            audioTranscriptionBox.SelectionStart = audioTranscriptionBox.TextLength;
-            audioTranscriptionBox.ScrollToCaret();
+            if (statusLabel == null) return;
+            if (String.IsNullOrEmpty(text)) return;
+            statusLabel.ForeColor = isError
+                ? Color.FromArgb(185, 28, 28)
+                : Color.FromArgb(75, 85, 99);
+            statusLabel.Text = text;
         }
 
         private string LiveTranscriptionText()
@@ -3192,7 +3150,7 @@ namespace TailMsg
             if (audio == null || audio.WavBytes == null) return;
             byte[] wavBytes = audio.WavBytes;
             string operationId = TailMsgDiagnostics.CreateOperationId();
-            ShowAudioTranscription("Transcrevendo...");
+            ShowAudioStatus("Transcrevendo o áudio...", false);
 
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -3208,13 +3166,12 @@ namespace TailMsg
                 {
                     if (ok)
                     {
-                        ShowAudioTranscription(text);
                         SetAudioTranscriptionText(text);
                         TranscriptionCache.Remember(operationId, text);
                     }
                     else
                     {
-                        ShowAudioTranscription("Não foi possível transcrever: " + error);
+                        ShowAudioStatus("Não foi possível transcrever: " + error, true);
                     }
                 });
             });
@@ -3294,7 +3251,6 @@ namespace TailMsg
                         liveCommitOffset = commitEndBytes;
                         liveLastDraftBytes = commitEndBytes;
                         TranscriptionCache.Remember(operationId, text);
-                        ShowAudioTranscription(LiveTranscriptionText());
                         SetAudioTranscriptionText(LiveTranscriptionText());
                         return;
                     }
@@ -3305,12 +3261,11 @@ namespace TailMsg
                     {
                         if (liveCommittedText.Length == 0 && liveDraftText.Length == 0)
                         {
-                            ShowAudioTranscription("Não foi possível transcrever: " + error);
+                            ShowAudioStatus("Não foi possível transcrever: " + error, true);
                         }
                         return;
                     }
                     liveDraftText = text;
-                    ShowAudioTranscription(LiveTranscriptionText());
                     SetAudioTranscriptionText(LiveTranscriptionText());
                 });
             });
@@ -3343,9 +3298,8 @@ namespace TailMsg
                     }
                     else if (liveCommittedText.Length == 0 && liveDraftText.Length == 0)
                     {
-                        ShowAudioTranscription("Não foi possível transcrever: " + error);
+                        ShowAudioStatus("Não foi possível transcrever: " + error, true);
                     }
-                    ShowAudioTranscription(LiveTranscriptionText());
                     SetAudioTranscriptionText(LiveTranscriptionText());
                 });
             });

@@ -1820,7 +1820,10 @@ namespace TailMsg
             AutoScroll = false;
             BackColor = Color.White;
             BorderStyle = BorderStyle.None;
-            Padding = new Padding(1, 1, 0, 1);
+            // Sem padding vertical: a barra dockada à direita ocupa a altura
+            // inteira (era ele que deixava 1 px branco em cima e embaixo). A
+            // margem do conteúdo é dada no layout, não aqui.
+            Padding = new Padding(1, 0, 0, 0);
             rowFont = new Font("Segoe UI", 9.5F);
 
             viewport = new Panel();
@@ -1834,8 +1837,9 @@ namespace TailMsg
             viewport.Controls.Add(content);
 
             scrollBar = new VScrollBar();
-            // Sem Dock: a barra é posicionada ocupando a altura inteira do
-            // painel, para não sobrar 1 px branco acima e abaixo dela.
+            // Dock à direita: o painel de conteúdo (Dock=Fill) respeita o
+            // espaço dela, então a barra nunca fica escondida atrás do conteúdo.
+            scrollBar.Dock = DockStyle.Right;
             scrollBar.Width = SystemInformation.VerticalScrollBarWidth;
             scrollBar.SmallChange = 24;
             scrollBar.Visible = false;
@@ -2126,7 +2130,9 @@ namespace TailMsg
                     // O conteúdo precisa da largura do viewport para o texto
                     // enviado poder encostar na direita.
                     content.Width = Math.Max(120, viewport.ClientSize.Width);
-                    int top = 0;
+                    // 1 px de respiro para o conteúdo não encostar na borda
+                    // desenhada em cima e embaixo.
+                    int top = 1;
                     foreach (Control control in Snapshot())
                     {
                         control.Width = width;
@@ -2136,7 +2142,7 @@ namespace TailMsg
                         top += control.Height + 2;
                     }
 
-                    content.Height = Math.Max(0, top);
+                    content.Height = Math.Max(0, top + 1);
                     int viewportHeight = ViewportHeight;
                     int overflow = Math.Max(0, content.Height - viewportHeight);
                     bool needed = overflow > 0;
@@ -2159,20 +2165,6 @@ namespace TailMsg
             {
                 layingOut = false;
             }
-            PlaceScrollBar();
-        }
-
-        // A barra ocupa a altura inteira e a borda direita é desenhada 1 px
-        // antes dela, para o contorno não sumir atrás da barra.
-        private void PlaceScrollBar()
-        {
-            if (scrollBar == null) return;
-            int width = scrollBar.Width;
-            scrollBar.Bounds = new Rectangle(
-                Math.Max(0, ClientSize.Width - width),
-                0,
-                width,
-                ClientSize.Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)

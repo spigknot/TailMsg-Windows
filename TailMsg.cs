@@ -2726,12 +2726,16 @@ namespace TailMsg
 
         // O RadioButton nativo não se desmarca: guardamos como ele estava no
         // MouseDown para o segundo clique poder desmarcar.
+        private RadioButton destinationMouseDownOwner;
         private bool destinationClickWasChecked;
 
         private void DestinationOptionMouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
             RadioButton option = sender as RadioButton;
+            // Só o clique real de mouse no próprio item pode desmarcar; a
+            // seleção por acessibilidade não passa por aqui.
+            destinationMouseDownOwner = option;
             destinationClickWasChecked = option != null && option.Checked;
         }
 
@@ -2739,7 +2743,10 @@ namespace TailMsg
         {
             RadioButton option = sender as RadioButton;
             if (option == null) return;
-            if (destinationClickWasChecked && option.Checked)
+            bool desmarcar = option == destinationMouseDownOwner && destinationClickWasChecked;
+            destinationMouseDownOwner = null;
+            destinationClickWasChecked = false;
+            if (desmarcar && option.Checked)
             {
                 option.Checked = false;
                 UpdateActionStates();
@@ -3656,91 +3663,119 @@ namespace TailMsg
             List<PeerInfo> recipients = targets;
             ThreadPool.QueueUserWorkItem(delegate
             {
+                // Um destinatário por thread: quem responde recebe na hora, sem
+                // esperar o timeout de quem está fora do ar.
                 bool sentText = false;
                 bool sentImage = false;
                 bool sentAudio = false;
                 string failure = "";
-                // O histórico é interface: os registros são preparados aqui e
-                // aplicados na thread da UI, dentro do TryBeginInvoke.
                 List<Action> registros = new List<Action>();
+                object sync = new object();
 
-                // Texto, imagem e áudio viajam como mensagens separadas, nesta
-                // ordem, para o destinatário usar o botão que quiser.
-                foreach (PeerInfo computer in recipients)
+                int pendentes = recipients.Count;
+                using (ManualResetEvent conclusao = new ManualResetEvent(false))
                 {
-                    string textId = "";
-                    string imageId = "";
-                    string audioId = "";
-
-                    if (message.Length > 0)
-                    {
-                        MessageSendResult textResult = MessageSender.Send(
-                            computer,
-                            localComputerName,
-                            message);
-                        if (textResult.Success)
-                        {
-                            sentText = true;
-                            textId = textResult.OperationId;
-                        }
-                        else if (failure.Length == 0)
-                        {
-                            failure = textResult.ErrorMessage;
-                        }
-                    }
-
-                    if (image != null)
-                    {
-                        MessageSendResult imageResult = MessageSender.SendImage(
-                            computer,
-                            localComputerName,
-                            image);
-                        if (imageResult.Success)
-                        {
-                            sentImage = true;
-                            imageId = imageResult.OperationId;
-                        }
-                        else if (failure.Length == 0)
-                        {
-                            failure = imageResult.ErrorMessage;
-                        }
-                    }
-
-                    if (audio != null)
-                    {
-                        MessageSendResult audioResult = MessageSender.SendAudio(
-                            computer,
-                            localComputerName,
-                            audio);
-                        if (audioResult.Success)
-                        {
-                            sentAudio = true;
-                            audioId = audioResult.OperationId;
-                        }
-                        else if (failure.Length == 0)
-                        {
-                            failure = audioResult.ErrorMessage;
-                        }
-                    }
-
-                    bool entregouTexto = textId.Length > 0;
-                    bool entregouImagem = imageId.Length > 0;
-                    bool entregouAudio = audioId.Length > 0;
-                    if (entregouTexto || entregouImagem || entregouAudio)
+                    foreach (PeerInfo computer in recipients)
                     {
                         PeerInfo alvo = computer;
-                        string textoId = textId;
-                        string imagemId = imageId;
-                        string audioIdRegistro = audioId;
-                        registros.Add(delegate
+                        ThreadPool.QueueUserWorkItem(delegate
                         {
-                            RegisterSentMessages(
-                                alvo,
-                                entregouTexto, textoId, message,
-                                entregouImagem, imagemId, image,
-                                entregouAudio, audioIdRegistro, audio);
+                            try
+                            {
+                                string textId = "";
+                                string imageId = "";
+                                string audioId = "";
+
+                                if (message.Length > 0)
+                                {
+                                    MessageSendResult textResult = MessageSender.Send(
+                                        alvo, localComputerName, message);
+                                    if (textResult.Success)
+                                    {
+                                        textId = textResult.OperationId;
+                                    }
+                                    else
+                                    {
+                                        lock (sync)
+                                        {
+                                            if (failure.Length == 0) failure = textResult.ErrorMessage;
+                                        }
+                                    }
+                                }
+
+                                if (image != null)
+                                {
+                                    MessageSendResult imageResult = MessageSender.SendImage(
+                                        alvo, localComputerName, image);
+                                    if (imageResult.Success)
+                                    {
+                                        imageId = imageResult.OperationId;
+                                    }
+                                    else
+                                    {
+                                        lock (sync)
+                                        {
+                                            if (failure.Length == 0) failure = imageResult.ErrorMessage;
+                                        }
+                                    }
+                                }
+
+                                if (audio != null)
+                                {
+                                    MessageSendResult audioResult = MessageSender.SendAudio(
+                                        alvo, localComputerName, audio);
+                                    if (audioResult.Success)
+                                    {
+                                        audioId = audioResult.OperationId;
+                                    }
+                                    else
+                                    {
+                                        lock (sync)
+                                        {
+                                            if (failure.Length == 0) failure = audioResult.ErrorMessage;
+                                        }
+                                    }
+                                }
+
+                                bool entregouTexto = textId.Length > 0;
+                                bool entregouImagem = imageId.Length > 0;
+                                bool entregouAudio = audioId.Length > 0;
+                                if (entregouTexto || entregouImagem || entregouAudio)
+                                {
+                                    string textoId = textId;
+                                    string imagemId = imageId;
+                                    string audioIdRegistro = audioId;
+                                    lock (sync)
+                                    {
+                                        if (entregouTexto) sentText = true;
+                                        if (entregouImagem) sentImage = true;
+                                        if (entregouAudio) sentAudio = true;
+                                        // O histórico é interface: aplica depois,
+                                        // na thread da UI, dentro do TryBeginInvoke.
+                                        registros.Add(delegate
+                                        {
+                                            RegisterSentMessages(
+                                                alvo,
+                                                entregouTexto, textoId, message,
+                                                entregouImagem, imagemId, image,
+                                                entregouAudio, audioIdRegistro, audio);
+                                        });
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                bool ultimo;
+                                lock (sync)
+                                {
+                                    pendentes--;
+                                    ultimo = pendentes <= 0;
+                                }
+                                if (ultimo) conclusao.Set();
+                            }
                         });
                     }
+                    conclusao.WaitOne();
                 }
 
                 TryBeginInvoke(delegate
@@ -8340,7 +8375,7 @@ namespace TailMsg
             try
             {
                 IAsyncResult connection = client.BeginConnect(peer.Address, peer.Port, null, null);
-                if (!connection.AsyncWaitHandle.WaitOne(4000))
+                if (!connection.AsyncWaitHandle.WaitOne(2000))
                 {
                     error = "O computador não respondeu na porta do TailMsg (38257).";
                     return false;
@@ -8429,7 +8464,7 @@ namespace TailMsg
                     ElapsedMilliseconds(started),
                     "port=" + peer.Port);
                 IAsyncResult connection = client.BeginConnect(peer.Address, peer.Port, null, null);
-                if (!connection.AsyncWaitHandle.WaitOne(4000))
+                if (!connection.AsyncWaitHandle.WaitOne(2000))
                 {
                     string timeout = "O computador não respondeu na porta do TailMsg (38257). Verifique o firewall do Windows.";
                     TailMsgDiagnostics.WriteMessageEvent(
@@ -8725,7 +8760,7 @@ namespace TailMsg
             try
             {
                 IAsyncResult connection = client.BeginConnect(peer.Address, peer.Port, null, null);
-                if (!connection.AsyncWaitHandle.WaitOne(4000))
+                if (!connection.AsyncWaitHandle.WaitOne(2000))
                 {
                     string timeout = "O computador não respondeu na porta do TailMsg (38257). Verifique o firewall do Windows.";
                     TailMsgDiagnostics.WriteMessageEvent(

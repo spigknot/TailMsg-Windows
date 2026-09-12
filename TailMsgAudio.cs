@@ -2697,7 +2697,9 @@ namespace TailMsg
     // tipo audio/wav) e devolve o texto transcrito.
     internal static class TranscriptionClient
     {
-        private const int TimeoutMilliseconds = 120000;
+        // A transcrição é informativa: se o servidor não responder rápido, o
+        // app segue a vida (o áudio já foi entregue).
+        private const int TimeoutMilliseconds = 30000;
         private const int AttemptsPerEndpoint = 2;
 
         public static bool TryTranscribe(

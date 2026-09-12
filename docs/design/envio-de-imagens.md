@@ -335,3 +335,19 @@ popup de mensagem recebida, à esquerda do `Enviar`, com **a mesma altura dele
 | Botões no popup | `invoke` da UIA lista `Gravar áudio na resposta`, o mic vermelho e o `Enviar` na mesma linha (22 px), sem sobreposição |
 | Transcrição no popup | áudio injetado mostrou `testando 1, 2,3. meu nome é gustavo e eu trabalho em tagaguaí.` na área de transcrição |
 | Acessibilidade/automação | o `IconButton` agora implementa `DoDefaultAction`, então a ação de pressionar funciona por leitor de tela e por automação |
+
+## 7. Histórico de imagens recebidas
+
+O histórico mostra `[HH:mm:ss] Remetente (ip): [imagem NN KB]` seguido de um
+botão do mesmo tamanho do play dos áudios (22 px). O botão leva o ícone
+`assets/imagem.png` (embutido como recurso `TailMsg.IconImage`) e, ao ser
+clicado, grava os bytes em `%TEMP%\TailMsg\imagem-<hash>.png` e entrega o
+caminho ao shell (`UseShellExecute`), que abre no aplicativo padrão do usuário.
+As dimensões não aparecem mais no resumo; a imagem fiel continua disponível no
+popup (botão Copiar) e no clique do ícone.
+
+Evidência do teste com o loopback: o histórico passou a exibir
+`[09:38:59] GUSTAVO (10.77.163.167): [imagem 26 KB]`, a UIA listou o botão
+`Abrir imagem` e o clique criou `%TEMP%\TailMsg\imagem-d77b1b9d6fb419aa.png`
+(26.481 bytes, os mesmos bytes enviados) e abriu o visualizador padrão do
+Windows.

@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
@@ -1795,6 +1797,15 @@ namespace TailMsg
             }
         }
 
+        // Linha de imagem: prefixo com o resumo e o botão que abre a imagem
+        // no aplicativo padrão do Windows (mesmo tamanho do play do áudio).
+        public InboxImageRow AppendImage(string prefix, byte[] imageBytes)
+        {
+            InboxImageRow row = new InboxImageRow(prefix, imageBytes, PlayerSize, rowFont);
+            AddRow(row);
+            return row;
+        }
+
         // Linha de áudio: prefixo, botão de play/pause e transcrição.
         public InboxAudioRow AppendAudio(
             string prefix,
@@ -1870,6 +1881,122 @@ namespace TailMsg
                 control.Width = width;
                 control.Location = new Point(Padding.Left, top);
                 top += control.Height + 2;
+            }
+        }
+    }
+
+    // Uma linha de imagem do histórico: prefixo e botão que abre a imagem no
+    // aplicativo padrão do Windows.
+    internal sealed class InboxImageRow : Panel
+    {
+        private static Image imageGlyph;
+        private readonly byte[] imageBytes;
+        private readonly Label prefixLabel;
+        private readonly IconButton openButton;
+
+        public InboxImageRow(string prefix, byte[] imageBytes, int iconSize, Font font)
+        {
+            this.imageBytes = imageBytes;
+            AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            BackColor = Color.White;
+
+            prefixLabel = new Label();
+            prefixLabel.AutoSize = true;
+            prefixLabel.Font = font;
+            prefixLabel.ForeColor = Color.FromArgb(31, 41, 55);
+            prefixLabel.Text = prefix;
+            prefixLabel.Margin = new Padding(0, 4, 4, 0);
+            Controls.Add(prefixLabel);
+
+            openButton = new IconButton();
+            openButton.Glyph = IconGlyph.None;
+            openButton.SourceImage = LoadImageGlyph();
+            openButton.CircleColor = Color.White;
+            openButton.CircleOutline = Color.FromArgb(196, 202, 210);
+            openButton.Size = new Size(iconSize, iconSize);
+            openButton.Location = new Point(prefixLabel.Right + 4, 0);
+            openButton.Enabled = imageBytes != null && imageBytes.Length > 0;
+            openButton.AccessibleName = "Abrir imagem";
+            openButton.Click += delegate { OpenImage(); };
+            Controls.Add(openButton);
+
+            Height = Math.Max(iconSize + 2, prefixLabel.Height + 4);
+            Resize += delegate { LayoutRow(); };
+            LayoutRow();
+        }
+
+        // O ícone vem embutido no executável (assets/imagem.png).
+        private static Image LoadImageGlyph()
+        {
+            if (imageGlyph == null)
+            {
+                try
+                {
+                    imageGlyph = AppResources.AudioIconImage();
+                }
+                catch
+                {
+                    imageGlyph = null;
+                }
+            }
+            return imageGlyph;
+        }
+
+        private void LayoutRow()
+        {
+            openButton.Location = new Point(prefixLabel.Right + 4, 0);
+        }
+
+        // Grava os bytes em um arquivo temporário e entrega ao sistema, que
+        // abre com o aplicativo padrão do usuário (mesmo caminho do Explorer).
+        private void OpenImage()
+        {
+            if (imageBytes == null || imageBytes.Length == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "Esta imagem não está mais disponível.",
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            try
+            {
+                string directory = Path.Combine(Path.GetTempPath(), "TailMsg");
+                Directory.CreateDirectory(directory);
+                string fileName = "imagem-" + ShortHash(imageBytes) + ".png";
+                string fullPath = Path.Combine(directory, fileName);
+                if (!File.Exists(fullPath))
+                {
+                    File.WriteAllBytes(fullPath, imageBytes);
+                }
+                Process.Start(new ProcessStartInfo(fullPath) { UseShellExecute = true });
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(
+                    this,
+                    "Não foi possível abrir a imagem: " + error.Message,
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+
+        private static string ShortHash(byte[] bytes)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(bytes);
+                StringBuilder text = new StringBuilder(16);
+                for (int i = 0; i < 8; i++)
+                {
+                    text.Append(hash[i].ToString("x2", CultureInfo.InvariantCulture));
+                }
+                return text.ToString();
             }
         }
     }

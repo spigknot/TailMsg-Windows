@@ -681,6 +681,11 @@ namespace TailMsg
             return LoadAudioIcon("TailMsg.IconMicRed");
         }
 
+        public static Image AudioIconImage()
+        {
+            return LoadAudioIcon("TailMsg.IconImage");
+        }
+
         public static Image AudioIconPause()
         {
             return LoadAudioIcon("TailMsg.IconPause");
@@ -3605,15 +3610,13 @@ namespace TailMsg
                     0,
                     "");
 
-                // O inbox continua sendo texto simples: a imagem entra como
-                // resumo e o conteúdo real fica no popup com o botão Copiar.
-                string summary = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
+                // O histórico mostra o resumo e um botão que abre a imagem
+                // recebida no aplicativo padrão do Windows.
+                string imagePrefix = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
                     e.SenderName + " (" + e.RemoteAddress + "): [imagem " +
-                    ImageTransfer.DescribeDimensions(e.Width, e.Height) + ", " +
                     ImageTransfer.DescribeBytes(
-                        e.ImageBytes == null ? 0 : e.ImageBytes.Length) + "]" +
-                    Environment.NewLine;
-                inboxBox.AppendText(summary);
+                        e.ImageBytes == null ? 0 : e.ImageBytes.Length) + "]";
+                inboxBox.AppendImage(imagePrefix, e.ImageBytes);
 
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,

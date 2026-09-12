@@ -1771,14 +1771,10 @@ namespace TailMsg
     {
         public static readonly Color LineColor = Color.FromArgb(100, 100, 100);
 
-        public static void Draw(Graphics graphics, ScrollableControl target)
+        public static void Draw(Graphics graphics, Control target, int reserveRight)
         {
             if (graphics == null || target == null) return;
-            int width = target.ClientSize.Width;
-            if (target.VerticalScroll.Visible)
-            {
-                width -= SystemInformation.VerticalScrollBarWidth;
-            }
+            int width = target.ClientSize.Width - Math.Max(0, reserveRight);
             int height = target.ClientSize.Height;
             if (width <= 1 || height <= 1) return;
             using (Pen pen = new Pen(LineColor))
@@ -1793,14 +1789,38 @@ namespace TailMsg
         private const int PlayerSize = 22;
         private InboxAudioRow activeRow;
         private Font rowFont;
+        private readonly VScrollBar scrollBar;
+        private bool layingOut;
 
         public InboxPanel()
         {
-            AutoScroll = true;
+            // A rolagem é própria: assim ela fica FORA do contorno (o AutoScroll
+            // do WinForms desenharia a barra dentro do retângulo) e o painel
+            // nunca mostra barra horizontal — o texto quebra linha.
+            AutoScroll = false;
             BackColor = Color.White;
             BorderStyle = BorderStyle.None;
             Padding = new Padding(6, 4, 6, 4);
             rowFont = new Font("Segoe UI", 9.5F);
+
+            scrollBar = new VScrollBar();
+            scrollBar.Dock = DockStyle.Right;
+            scrollBar.Width = SystemInformation.VerticalScrollBarWidth;
+            scrollBar.SmallChange = 24;
+            scrollBar.Visible = false;
+            scrollBar.Scroll += delegate { LayoutRows(); };
+            Controls.Add(scrollBar);
+        }
+
+        // Largura útil para o conteúdo (desconta a barra de rolagem, que é
+        // desenhada fora do contorno).
+        private int ContentWidth
+        {
+            get
+            {
+                int reserved = scrollBar != null && scrollBar.Visible ? scrollBar.Width : 0;
+                return Math.Max(120, ClientSize.Width - reserved - Padding.Horizontal - 20);
+            }
         }
 
         // Linhas de texto e de imagem continuam sendo texto simples.
@@ -1816,7 +1836,7 @@ namespace TailMsg
                 label.Font = rowFont;
                 label.ForeColor = Color.FromArgb(31, 41, 55);
                 label.Text = line;
-                label.MaximumSize = new Size(Math.Max(200, ClientSize.Width - 30), 0);
+                label.MaximumSize = new Size(ContentWidth, 0);
                 AddRow(label);
             }
         }
@@ -1881,11 +1901,11 @@ namespace TailMsg
         private void AddRow(Control row)
         {
             SuspendLayout();
-            row.Width = Math.Max(120, ClientSize.Width - 26);
+            row.Width = ContentWidth;
             Controls.Add(row);
             ResumeLayout();
             LayoutRows();
-            ScrollControlIntoView(row);
+            ScrollToBottom();
         }
 
         protected override void OnClientSizeChanged(EventArgs e)
@@ -1894,24 +1914,90 @@ namespace TailMsg
             LayoutRows();
         }
 
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            if (scrollBar != null && scrollBar.Visible)
+            {
+                int delta = e.Delta > 0 ? -scrollBar.SmallChange * 3 : scrollBar.SmallChange * 3;
+                SetScrollValue(scrollBar.Value + delta);
+            }
+        }
+
+        // Mantém a última linha visível quando chega uma mensagem nova.
+        private void ScrollToBottom()
+        {
+            if (scrollBar == null || !scrollBar.Visible) return;
+            SetScrollValue(scrollBar.Maximum);
+        }
+
+        private void SetScrollValue(int value)
+        {
+            int maximum = Math.Max(0, scrollBar.Maximum - scrollBar.LargeChange + 1);
+            int clamped = Math.Max(0, Math.Min(value, maximum));
+            if (scrollBar.Value != clamped)
+            {
+                scrollBar.Value = clamped;
+            }
+            LayoutRows();
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            BoxBorder.Draw(e.Graphics, this);
+            int reserved = scrollBar != null && scrollBar.Visible ? scrollBar.Width : 0;
+            BoxBorder.Draw(e.Graphics, this, reserved);
         }
 
         // Empilha as linhas de cima para baixo, cada uma com a altura que o
         // conteúdo pedir (a transcrição pode ocupar mais de uma linha).
+        // Posiciona as linhas e ajusta a barra em passadas curtas: a largura
+        // útil depende de a barra estar visível, e a altura do conteúdo depende
+        // da largura. A guarda corta a recursão que estourava a pilha.
         private void LayoutRows()
         {
-            int top = Padding.Top;
-            int width = Math.Max(120, ClientSize.Width - 26);
-            foreach (Control control in Controls)
+            if (layingOut) return;
+            layingOut = true;
+            try
             {
-                control.Width = width;
-                control.Location = new Point(Padding.Left, top);
-                top += control.Height + 2;
+                for (int pass = 0; pass < 3; pass++)
+                {
+                    bool visibleBefore = scrollBar.Visible;
+                    int width = ContentWidth;
+                    int start = Padding.Top - scrollBar.Value;
+                    int top = start;
+                    foreach (Control control in Controls)
+                    {
+                        if (control == scrollBar) continue;
+                        control.Width = width;
+                        control.Location = new Point(Padding.Left, top);
+                        top += control.Height + 2;
+                    }
+
+                    int contentHeight = top - start + Padding.Bottom;
+                    int viewport = ClientSize.Height - Padding.Vertical;
+                    int overflow = Math.Max(0, contentHeight - viewport);
+                    bool needed = overflow > 0;
+
+                    scrollBar.LargeChange = Math.Max(1, viewport / 4);
+                    scrollBar.Maximum = overflow + scrollBar.LargeChange - 1;
+                    int maximum = Math.Max(0, scrollBar.Maximum - scrollBar.LargeChange + 1);
+                    if (scrollBar.Value > maximum) scrollBar.Value = maximum;
+
+                    if (needed != visibleBefore)
+                    {
+                        // A barra entra ou sai e muda a largura útil: refaz.
+                        scrollBar.Visible = needed;
+                        continue;
+                    }
+                    break;
+                }
             }
+            finally
+            {
+                layingOut = false;
+            }
+            Invalidate();
         }
     }
 
@@ -1975,9 +2061,24 @@ namespace TailMsg
             return imageGlyph;
         }
 
+        private bool layingOutRow;
+
         private void LayoutRow()
         {
-            openButton.Location = new Point(prefixLabel.Right + 4, 0);
+            if (layingOutRow) return;
+            layingOutRow = true;
+            try
+            {
+                int available = Parent == null ? Width : Parent.ClientSize.Width;
+                available = Math.Max(160, available - 30);
+                prefixLabel.MaximumSize = new Size(Math.Max(80, available - openButton.Width - 12), 0);
+                openButton.Location = new Point(prefixLabel.Right + 4, 0);
+                Height = Math.Max(openButton.Height + 2, prefixLabel.Height + 4);
+            }
+            finally
+            {
+                layingOutRow = false;
+            }
         }
 
         // Grava os bytes em um arquivo temporário e entrega ao sistema, que
@@ -2063,6 +2164,7 @@ namespace TailMsg
     {
         private readonly AudioPayload audio;
         private readonly IconButton playButton;
+        private readonly Label prefixLabel;
         private readonly Label transcriptionLabel;
         private readonly WavePlayer player = new WavePlayer();
         private readonly System.Windows.Forms.Timer ticker;
@@ -2101,7 +2203,7 @@ namespace TailMsg
             bool loaded = payload != null && payload.WavBytes != null &&
                 player.Load(payload.WavBytes, out loadError);
 
-            Label prefixLabel = new Label();
+            prefixLabel = new Label();
             prefixLabel.AutoSize = true;
             prefixLabel.Font = font;
             prefixLabel.ForeColor = Color.FromArgb(31, 41, 55);
@@ -2204,9 +2306,23 @@ namespace TailMsg
             playButton.Invalidate();
         }
 
+        private bool layingOutRow;
+
         private void LayoutRow()
         {
+            if (layingOutRow) return;
+            layingOutRow = true;
             SuspendLayout();
+            try
+            {
+            // Espaço disponível na linha do histórico: o que sobra depois do
+            // prefixo e do botão. A transcrição quebra dentro dele, para a
+            // caixa nunca precisar de barra de rolagem horizontal.
+            int available = Parent == null ? Width : Parent.ClientSize.Width;
+            available = Math.Max(160, available - 30);
+            int reserved = prefixLabel.Width + playButton.Width + 12;
+            transcriptionLabel.MaximumSize = new Size(Math.Max(60, available - reserved), 0);
+
             Control[] children = new Control[Controls.Count];
             Controls.CopyTo(children, 0);
             int left = 0;
@@ -2217,9 +2333,14 @@ namespace TailMsg
                 left += child.Width + 4;
                 if (child.Height > height) height = child.Height;
             }
-            Width = Math.Max(140, left);
+            Width = Math.Min(Math.Max(140, left), available);
             Height = Math.Max(22, height + 2);
-            ResumeLayout();
+            }
+            finally
+            {
+                ResumeLayout();
+                layingOutRow = false;
+            }
         }
     }
 

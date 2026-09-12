@@ -1497,6 +1497,9 @@ namespace TailMsg
 
         private readonly FlowLayoutPanel computerList;
         private readonly MessageTextBox messageBox;
+        private VScrollBar peerScroll;
+        private Panel peerViewport;
+        private Panel peerListBorder;
         private readonly InboxPanel inboxBox;
         private readonly Button sendButton;
         private readonly Button refreshButton;
@@ -1822,22 +1825,46 @@ namespace TailMsg
             listBorder.Padding = new Padding(0);
             listBorder.BackColor = Color.White;
             computerArea.Controls.Add(listBorder, 0, 1);
+            peerListBorder = listBorder;
+
+            peerViewport = new Panel();
+            peerViewport.Dock = DockStyle.Fill;
+            peerViewport.BackColor = Color.White;
+            peerViewport.MouseWheel += PeerListMouseWheel;
+            listBorder.Controls.Add(peerViewport);
+
+            peerScroll = new VScrollBar();
+            peerScroll.Dock = DockStyle.Right;
+            peerScroll.Width = SystemInformation.VerticalScrollBarWidth;
+            peerScroll.SmallChange = 24;
+            peerScroll.Visible = false;
+            peerScroll.Scroll += delegate { LayoutPeerList(); };
+            listBorder.Controls.Add(peerScroll);
+
+            // O contorno é desenhado no container, parando antes da barra de
+            // rolagem — a barra fica fora do retângulo, como na caixa de texto.
+            listBorder.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                BoxBorder.Draw(e.Graphics, listBorder,
+                    peerScroll != null && peerScroll.Visible ? peerScroll.Width : 0);
+            };
 
             computerList = new FlowLayoutPanel();
-            computerList.Dock = DockStyle.Fill;
+            computerList.AutoSize = true;
+            computerList.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             computerList.FlowDirection = FlowDirection.TopDown;
             computerList.WrapContents = false;
-            computerList.AutoScroll = true;
+            computerList.AutoScroll = false;
             computerList.Padding = new Padding(10, 8, 10, 8);
             computerList.BackColor = Color.White;
-            computerList.Resize += ResizeComputerOptions;
-            // Mesmo contorno da caixa de mensagem, sem envolver a barra de
-            // rolagem (quando ela existe, a borda para antes dela).
-            computerList.Paint += delegate(object sender, PaintEventArgs e)
-            {
-                BoxBorder.Draw(e.Graphics, computerList);
-            };
-            listBorder.Controls.Add(computerList);
+            computerList.Location = new Point(0, 0);
+            computerList.MouseWheel += PeerListMouseWheel;
+            // Um único caminho de layout: mudanças na lista ou no container
+            // pedem o recálculo, e a guarda impede a recursão entre eles.
+            computerList.ControlAdded += delegate { LayoutPeerList(); };
+            computerList.ControlRemoved += delegate { LayoutPeerList(); };
+            peerViewport.Controls.Add(computerList);
+            listBorder.SizeChanged += delegate { LayoutPeerList(); };
 
             Label inboxLabel = new Label();
             inboxLabel.Dock = DockStyle.Fill;
@@ -2256,11 +2283,72 @@ namespace TailMsg
 
         private void ResizeComputerOptions(object sender, EventArgs e)
         {
-            int width = Math.Max(100, computerList.ClientSize.Width - 30);
+            ResizeComputerItems();
+        }
+
+        // Largura dos itens conforme o espaço visível (sem disparar layout).
+        private void ResizeComputerItems()
+        {
+            if (peerViewport == null || computerList == null) return;
+            int available = peerViewport.ClientSize.Width;
+            if (available <= 0) return;
+            int width = Math.Max(100, available - 30);
             foreach (Control control in computerList.Controls)
             {
-                control.Width = width;
+                if (control.Width != width) control.Width = width;
             }
+        }
+
+        // Rolagem própria da lista de destinos: a barra fica fora do contorno.
+        private bool peerLayingOut;
+
+        private void LayoutPeerList()
+        {
+            if (peerViewport == null || peerScroll == null || computerList == null) return;
+            if (peerLayingOut) return;
+            peerLayingOut = true;
+            try
+            {
+                for (int pass = 0; pass < 4; pass++)
+                {
+                    bool visibleBefore = peerScroll.Visible;
+                    ResizeComputerItems();
+                    int viewportHeight = peerViewport.ClientSize.Height;
+                    int contentHeight = computerList.Height;
+                    int overflow = Math.Max(0, contentHeight - viewportHeight);
+                    bool needed = overflow > 0;
+
+                    peerScroll.LargeChange = Math.Max(1, viewportHeight / 4);
+                    peerScroll.Maximum = overflow + peerScroll.LargeChange - 1;
+                    int maximum = Math.Max(0, peerScroll.Maximum - peerScroll.LargeChange + 1);
+                    if (peerScroll.Value > maximum) peerScroll.Value = maximum;
+                    computerList.Top = needed ? -peerScroll.Value : 0;
+
+                    if (needed != visibleBefore)
+                    {
+                        peerScroll.Visible = needed;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            finally
+            {
+                peerLayingOut = false;
+            }
+            if (peerListBorder != null)
+            {
+                peerListBorder.Invalidate();
+            }
+        }
+
+        private void PeerListMouseWheel(object sender, MouseEventArgs e)
+        {
+            if (peerScroll == null || !peerScroll.Visible) return;
+            int delta = e.Delta > 0 ? -peerScroll.SmallChange * 3 : peerScroll.SmallChange * 3;
+            peerScroll.Value = Math.Max(0, Math.Min(peerScroll.Value + delta,
+                Math.Max(0, peerScroll.Maximum - peerScroll.LargeChange + 1)));
+            LayoutPeerList();
         }
 
         private bool TryBeginInvoke(MethodInvoker action)

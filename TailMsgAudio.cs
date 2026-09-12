@@ -1818,12 +1818,12 @@ namespace TailMsg
             // painel interno com 1 px de margem, para nenhuma linha encostar na
             // borda desenhada (era o pedaço de mensagem sobre o contorno).
             AutoScroll = false;
-            BackColor = Color.White;
+            // O contorno é o próprio fundo do painel aparecendo na margem de
+            // 1 px: desenhado à mão ele seria coberto pelo painel de conteúdo,
+            // e qualquer folga da barra aparece como contorno em vez de branco.
+            BackColor = BoxBorder.LineColor;
             BorderStyle = BorderStyle.None;
-            // Sem padding vertical: a barra dockada à direita ocupa a altura
-            // inteira (era ele que deixava 1 px branco em cima e embaixo). A
-            // margem do conteúdo é dada no layout, não aqui.
-            Padding = new Padding(1, 0, 0, 0);
+            Padding = new Padding(1, 1, 1, 1);
             rowFont = new Font("Segoe UI", 9.5F);
 
             viewport = new Panel();
@@ -2130,9 +2130,7 @@ namespace TailMsg
                     // O conteúdo precisa da largura do viewport para o texto
                     // enviado poder encostar na direita.
                     content.Width = Math.Max(120, viewport.ClientSize.Width);
-                    // 1 px de respiro para o conteúdo não encostar na borda
-                    // desenhada em cima e embaixo.
-                    int top = 1;
+                    int top = 0;
                     foreach (Control control in Snapshot())
                     {
                         control.Width = width;
@@ -2142,7 +2140,7 @@ namespace TailMsg
                         top += control.Height + 2;
                     }
 
-                    content.Height = Math.Max(0, top + 1);
+                    content.Height = Math.Max(0, top);
                     int viewportHeight = ViewportHeight;
                     int overflow = Math.Max(0, content.Height - viewportHeight);
                     bool needed = overflow > 0;
@@ -2167,12 +2165,7 @@ namespace TailMsg
             }
         }
 
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            int reserved = scrollBar != null && scrollBar.Visible ? scrollBar.Width : 0;
-            BoxBorder.Draw(e.Graphics, this, reserved);
-        }
+
     }
 
     // Base das linhas que o menu de contexto pode apagar.

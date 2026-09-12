@@ -1500,6 +1500,7 @@ namespace TailMsg
         private readonly MessageTextBox messageBox;
         private VScrollBar peerScroll;
         private Panel peerViewport;
+        private Panel peerClip;
         private Panel peerListBorder;
         private readonly InboxPanel inboxBox;
         private readonly Button sendButton;
@@ -1820,25 +1821,33 @@ namespace TailMsg
 
             peerViewport = new Panel();
             peerViewport.Dock = DockStyle.Fill;
-            peerViewport.BackColor = Color.White;
+            // Mesmo contorno do histórico: o fundo do viewport aparece na margem
+            // de 1 px e a barra de rolagem fica FORA do retângulo.
+            peerViewport.BackColor = BoxBorder.LineColor;
             peerViewport.MouseWheel += PeerListMouseWheel;
             listBorder.Controls.Add(peerViewport);
 
+            // Recorte interno: as linhas de destinatários nunca cobrem a margem.
+            peerClip = new Panel();
+            peerClip.Location = new Point(1, 1);
+            peerClip.BackColor = Color.White;
+            peerViewport.Controls.Add(peerClip);
+
+            // Faixa sempre reservada, com a barra dentro: o contorno dos
+            // destinatários fica na mesma coluna dos outros, com ou sem barra.
+            Panel peerStrip = new Panel();
+            peerStrip.Dock = DockStyle.Right;
+            peerStrip.Width = SystemInformation.VerticalScrollBarWidth;
+            peerStrip.BackColor = Color.White;
+            listBorder.Controls.Add(peerStrip);
+
             peerScroll = new VScrollBar();
-            peerScroll.Dock = DockStyle.Right;
+            peerScroll.Dock = DockStyle.Fill;
             peerScroll.Width = SystemInformation.VerticalScrollBarWidth;
             peerScroll.SmallChange = 24;
             peerScroll.Visible = false;
             peerScroll.Scroll += delegate { LayoutPeerList(); };
-            listBorder.Controls.Add(peerScroll);
-
-            // O contorno é desenhado no container, parando antes da barra de
-            // rolagem — a barra fica fora do retângulo, como na caixa de texto.
-            listBorder.Paint += delegate(object sender, PaintEventArgs e)
-            {
-                BoxBorder.Draw(e.Graphics, listBorder,
-                    peerScroll != null && peerScroll.Visible ? peerScroll.Width : 0);
-            };
+            peerStrip.Controls.Add(peerScroll);
 
             peerTooltip = new ToolTip();
             // O balãozinho com o IP aparece depois de 1 segundo com o mouse parado.
@@ -1859,7 +1868,7 @@ namespace TailMsg
             // pedem o recálculo, e a guarda impede a recursão entre eles.
             computerList.ControlAdded += delegate { LayoutPeerList(); };
             computerList.ControlRemoved += delegate { LayoutPeerList(); };
-            peerViewport.Controls.Add(computerList);
+            peerClip.Controls.Add(computerList);
             listBorder.SizeChanged += delegate { LayoutPeerList(); };
 
             Label inboxLabel = new Label();
@@ -2287,8 +2296,8 @@ namespace TailMsg
         // Largura dos itens conforme o espaço visível (sem disparar layout).
         private void ResizeComputerItems()
         {
-            if (peerViewport == null || computerList == null) return;
-            int available = peerViewport.ClientSize.Width;
+            if (peerViewport == null || peerClip == null || computerList == null) return;
+            int available = peerClip.ClientSize.Width;
             if (available <= 0) return;
             int columns = Math.Max(1, computerList.ColumnCount);
             int width = Math.Max(90, (available - 30) / columns - 12);
@@ -2326,8 +2335,13 @@ namespace TailMsg
                 for (int pass = 0; pass < 4; pass++)
                 {
                     bool visibleBefore = peerScroll.Visible;
+                    peerClip.Bounds = new Rectangle(
+                        1,
+                        1,
+                        Math.Max(1, peerViewport.ClientSize.Width - 2),
+                        Math.Max(1, peerViewport.ClientSize.Height - 2));
                     ResizeComputerItems();
-                    int viewportHeight = peerViewport.ClientSize.Height;
+                    int viewportHeight = peerClip.ClientSize.Height;
                     int contentHeight = computerList.Height;
                     int overflow = Math.Max(0, contentHeight - viewportHeight);
                     bool needed = overflow > 0;
@@ -2353,6 +2367,10 @@ namespace TailMsg
             if (peerListBorder != null)
             {
                 peerListBorder.Invalidate();
+            }
+            if (peerViewport != null)
+            {
+                peerViewport.Invalidate();
             }
         }
 

@@ -1848,15 +1848,22 @@ namespace TailMsg
             content.BackColor = Color.White;
             clip.Controls.Add(content);
 
+            // A faixa da barra é sempre reservada (painel branco à direita), com
+            // a barra dentro dela: assim o contorno termina na mesma coluna da
+            // caixa de mensagem, esteja a barra visível ou não.
+            Panel scrollStrip = new Panel();
+            scrollStrip.Dock = DockStyle.Right;
+            scrollStrip.Width = SystemInformation.VerticalScrollBarWidth;
+            scrollStrip.BackColor = Color.White;
+            Controls.Add(scrollStrip);
+
             scrollBar = new VScrollBar();
-            // Dock à direita: o painel de conteúdo (Dock=Fill) respeita o
-            // espaço dela, então a barra nunca fica escondida atrás do conteúdo.
-            scrollBar.Dock = DockStyle.Right;
+            scrollBar.Dock = DockStyle.Fill;
             scrollBar.Width = SystemInformation.VerticalScrollBarWidth;
             scrollBar.SmallChange = 24;
             scrollBar.Visible = false;
             scrollBar.Scroll += delegate { ApplyScroll(); };
-            Controls.Add(scrollBar);
+            scrollStrip.Controls.Add(scrollBar);
         }
 
         // O layout pode rodar antes do viewport existir (o próprio construtor

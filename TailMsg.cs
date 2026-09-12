@@ -2,11 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -288,16 +291,40 @@ namespace TailMsg
                 TailMsgProtocol.Decode(TailMsgProtocol.Encode(largeMessage)) ==
                 largeMessage;
 
+            string imageFailure = ImageSelfTests.ProtocolFailure();
+            if (imageFailure.Length == 0)
+            {
+                imageFailure = ImageSelfTests.PastePolicyFailure();
+            }
+            if (imageFailure.Length == 0)
+            {
+                imageFailure = ImageSelfTests.ThumbnailFailure();
+            }
+            if (imageFailure.Length == 0)
+            {
+                imageFailure = AudioSelfTests.ProtocolFailure();
+            }
+            if (imageFailure.Length == 0)
+            {
+                imageFailure = AudioSelfTests.TranscriptionFailure();
+            }
+
             if (!valid10 || !validTailscale || invalidTailscale ||
                 decoded != "Olá | TailMsg" || !largeMessageValid ||
-                !tailscaleParserValid)
+                !tailscaleParserValid || imageFailure.Length > 0)
             {
-                Console.Error.WriteLine("Falha no teste do protocolo de rede.");
+                Console.Error.WriteLine(
+                    "Falha no teste do protocolo de rede." +
+                    (imageFailure.Length > 0
+                        ? " Imagem: " + imageFailure
+                        : ""));
                 Environment.ExitCode = 1;
                 return;
             }
 
-            Console.WriteLine("OK - protocolo e filtros de endereço funcionando.");
+            Console.WriteLine(
+                "OK - protocolo, filtros de endereço, política de colagem, " +
+                "imagem, áudio e leitura de transcrição funcionando.");
         }
 
         private static void RunIntegrationSelfTest(string operationId)
@@ -305,7 +332,9 @@ namespace TailMsg
             string failure;
             if (IntegrationSelfTest.TryRun(operationId, out failure))
             {
-                Console.WriteLine("OK - descoberta UDP, envio TCP e ACK funcionando.");
+                Console.WriteLine(
+                    "OK - descoberta UDP, envio TCP, ACK, imagem e áudio em " +
+                    "blocos funcionando.");
                 return;
             }
 
@@ -617,6 +646,44 @@ namespace TailMsg
             }
 
             return null;
+        }
+
+        // Ícones de áudio embutidos no executável (assets\*.png, 256x256 com
+        // transparência). Devolve null se o recurso não existir, para o botão
+        // cair no desenho vetorial.
+        public static Image LoadAudioIcon(string resourceName)
+        {
+            try
+            {
+                Assembly assembly = Assembly.GetExecutingAssembly();
+                using (Stream resource = assembly.GetManifestResourceStream(resourceName))
+                {
+                    if (resource == null) return null;
+                    using (Image source = Image.FromStream(resource))
+                    {
+                        return new Bitmap(source);
+                    }
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static Image AudioIconWhiteMicrophone()
+        {
+            return LoadAudioIcon("TailMsg.IconMicWhite");
+        }
+
+        public static Image AudioIconRedMicrophone()
+        {
+            return LoadAudioIcon("TailMsg.IconMicRed");
+        }
+
+        public static Image AudioIconPause()
+        {
+            return LoadAudioIcon("TailMsg.IconPause");
         }
     }
 
@@ -1056,9 +1123,366 @@ namespace TailMsg
         }
     }
 
+    // Decisão de colagem: imagem sem texto é consumida pela política (o
+    // controle nativo não vê o Ctrl+V); imagem junto com texto anexa a imagem
+    // e deixa o texto ser colado normalmente.
+    internal enum PasteDecision
+    {
+        None = 0,
+        ImageOnly = 1,
+        ImageAndText = 2
+    }
+
+    internal static class ClipboardPastePolicy
+    {
+        public static PasteDecision Decide(bool hasImage, bool hasText)
+        {
+            if (!hasImage) return PasteDecision.None;
+            return hasText ? PasteDecision.ImageAndText : PasteDecision.ImageOnly;
+        }
+
+        public static bool ShouldConsume(PasteDecision decision)
+        {
+            return decision == PasteDecision.ImageOnly;
+        }
+    }
+
+    internal static class ClipboardImageReader
+    {
+        private const int ClipboardAttempts = 3;
+
+        public static bool TryProbe(out bool hasImage, out bool hasText)
+        {
+            hasImage = false;
+            hasText = false;
+            for (int attempt = 0; attempt < ClipboardAttempts; attempt++)
+            {
+                try
+                {
+                    hasImage = Clipboard.ContainsImage();
+                    hasText = Clipboard.ContainsText() ||
+                        Clipboard.ContainsData(DataFormats.UnicodeText);
+                    return true;
+                }
+                catch (ExternalException)
+                {
+                    // Outro processo pode estar com a área de transferência
+                    // aberta; espera curta antes de desistir.
+                    Thread.Sleep(40);
+                }
+            }
+            return false;
+        }
+
+        // Converte a imagem da área de transferência para PNG (sem perda) e
+        // devolve as dimensões originais.
+        public static bool TryReadImage(out ImagePayload payload, out string error)
+        {
+            payload = null;
+            error = "";
+            for (int attempt = 0; attempt < ClipboardAttempts; attempt++)
+            {
+                try
+                {
+                    if (!Clipboard.ContainsImage())
+                    {
+                        return false;
+                    }
+
+                    using (Image source = Clipboard.GetImage())
+                    {
+                        if (source == null)
+                        {
+                            return false;
+                        }
+
+                        int width = source.Width;
+                        int height = source.Height;
+                        if (width <= 0 || height <= 0)
+                        {
+                            error = "A imagem copiada não tem dimensões válidas.";
+                            return false;
+                        }
+
+                        using (MemoryStream buffer = new MemoryStream())
+                        {
+                            source.Save(buffer, ImageFormat.Png);
+                            ImagePayload result = new ImagePayload();
+                            result.PngBytes = buffer.ToArray();
+                            result.Width = width;
+                            result.Height = height;
+                            payload = result;
+                            return true;
+                        }
+                    }
+                }
+                catch (ExternalException)
+                {
+                    Thread.Sleep(40);
+                }
+                catch (Exception exception)
+                {
+                    error = "Não foi possível ler a imagem copiada: " +
+                        exception.Message;
+                    return false;
+                }
+            }
+
+            error = "A área de transferência está em uso por outro programa. Tente colar novamente.";
+            return false;
+        }
+    }
+
+    // Caixa de mensagem que transforma Ctrl+V de imagem em anexo. O texto
+    // continua sendo colado pelo controle nativo quando houver texto junto.
+    internal sealed class MessageTextBox : TextBox
+    {
+        private const int WmKeyDown = 0x0100;
+        private const int WmPaste = 0x0302;
+
+        public event EventHandler<ImagePastedEventArgs> ImagePasted;
+        public event EventHandler<ImagePasteFailedEventArgs> ImagePasteFailed;
+
+        private bool captureEnabled = true;
+        private bool suppressEditNotification;
+
+        // Disparado quando o USUÁRIO mexe no texto (não quando o app escreve a
+        // transcrição do áudio).
+        public event EventHandler UserEdited;
+
+        internal bool CaptureEnabled
+        {
+            get { return captureEnabled; }
+            set { captureEnabled = value; }
+        }
+
+        internal bool SuppressEditNotification
+        {
+            get { return suppressEditNotification; }
+            set { suppressEditNotification = value; }
+        }
+
+        // Escreve a transcrição do áudio sem marcar como edição do usuário.
+        internal void SetProgrammaticText(string text)
+        {
+            suppressEditNotification = true;
+            try
+            {
+                Text = text == null ? "" : text;
+                SelectionStart = TextLength;
+                ScrollToCaret();
+            }
+            finally
+            {
+                suppressEditNotification = false;
+            }
+        }
+
+        protected override void OnTextChanged(EventArgs e)
+        {
+            base.OnTextChanged(e);
+            if (suppressEditNotification) return;
+            EventHandler handler = UserEdited;
+            if (handler != null) handler(this, EventArgs.Empty);
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (IsPasteShortcut(keyData) || IsShiftInsert(keyData))
+            {
+                bool consume;
+                if (TryCaptureImage(out consume) && consume)
+                {
+                    return true;
+                }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WmPaste)
+            {
+                bool consume;
+                if (TryCaptureImage(out consume) && consume)
+                {
+                    return;
+                }
+            }
+            else if (m.Msg == WmKeyDown && IsShiftInsertKeyDown(m))
+            {
+                bool consume;
+                if (TryCaptureImage(out consume) && consume)
+                {
+                    return;
+                }
+            }
+            base.WndProc(ref m);
+        }
+
+        private static bool IsPasteShortcut(Keys keyData)
+        {
+            return (keyData & Keys.KeyCode) == Keys.V &&
+                (keyData & Keys.Control) == Keys.Control;
+        }
+
+        private static bool IsShiftInsert(Keys keyData)
+        {
+            return (keyData & Keys.KeyCode) == Keys.Insert &&
+                (keyData & Keys.Shift) == Keys.Shift;
+        }
+
+        private static bool IsShiftInsertKeyDown(Message m)
+        {
+            int virtualKey = m.WParam.ToInt32() & 0xFFFF;
+            if (virtualKey != 0x2D) return false;   // VK_INSERT
+            return (ModifierKeys & Keys.Shift) == Keys.Shift;
+        }
+
+        // Tenta capturar a imagem do clipboard. Devolve true quando a política
+        // anexou a imagem; consume indica se o evento nativo deve ser abortado.
+        internal bool TryCaptureImage(out bool consume)
+        {
+            consume = false;
+            if (!captureEnabled) return false;
+
+            bool hasImage;
+            bool hasText;
+            if (!ClipboardImageReader.TryProbe(out hasImage, out hasText))
+            {
+                return false;
+            }
+
+            PasteDecision decision = ClipboardPastePolicy.Decide(hasImage, hasText);
+            if (decision == PasteDecision.None)
+            {
+                return false;
+            }
+
+            ImagePayload payload;
+            string error;
+            if (!ClipboardImageReader.TryReadImage(out payload, out error))
+            {
+                if (!String.IsNullOrEmpty(error))
+                {
+                    ImagePasteFailedEventArgs failure = new ImagePasteFailedEventArgs();
+                    failure.ErrorMessage = error;
+                    EventHandler<ImagePasteFailedEventArgs> failedHandler = ImagePasteFailed;
+                    if (failedHandler != null) failedHandler(this, failure);
+                }
+                return false;
+            }
+
+            ImagePastedEventArgs args = new ImagePastedEventArgs();
+            args.Image = payload;
+            EventHandler<ImagePastedEventArgs> handler = ImagePasted;
+            if (handler != null) handler(this, args);
+
+            consume = ClipboardPastePolicy.ShouldConsume(decision);
+            return true;
+        }
+    }
+
+    internal sealed class ImagePastedEventArgs : EventArgs
+    {
+        public ImagePayload Image;
+    }
+
+    internal sealed class ImagePasteFailedEventArgs : EventArgs
+    {
+        public string ErrorMessage;
+    }
+
+    internal static class ImageTransfer
+    {
+        public static Bitmap CreateThumbnail(
+            byte[] pngBytes,
+            int maximumWidth,
+            int maximumHeight,
+            out string error)
+        {
+            error = "";
+            try
+            {
+                using (MemoryStream buffer = new MemoryStream(pngBytes))
+                using (Image decoded = Image.FromStream(buffer))
+                {
+                    double scale = Math.Min(
+                        (double)maximumWidth / decoded.Width,
+                        (double)maximumHeight / decoded.Height);
+                    if (scale > 1.0) scale = 1.0;
+                    int width = Math.Max(1, (int)Math.Round(decoded.Width * scale));
+                    int height = Math.Max(1, (int)Math.Round(decoded.Height * scale));
+                    Bitmap thumbnail = new Bitmap(width, height);
+                    using (Graphics graphics = Graphics.FromImage(thumbnail))
+                    {
+                        graphics.InterpolationMode =
+                            System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        graphics.PixelOffsetMode =
+                            System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                        graphics.DrawImage(decoded, 0, 0, width, height);
+                    }
+                    return thumbnail;
+                }
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return null;
+            }
+        }
+
+        public static string DescribeDimensions(int width, int height)
+        {
+            return width.ToString(CultureInfo.InvariantCulture) + "x" +
+                height.ToString(CultureInfo.InvariantCulture);
+        }
+
+        public static string DescribeBytes(long bytes)
+        {
+            if (bytes >= 1024L * 1024L)
+            {
+                return (bytes / (1024.0 * 1024.0)).ToString("0.0", CultureInfo.InvariantCulture) + " MB";
+            }
+            if (bytes >= 1024L)
+            {
+                return (bytes / 1024.0).ToString("0", CultureInfo.InvariantCulture) + " KB";
+            }
+            return bytes.ToString(CultureInfo.InvariantCulture) + " bytes";
+        }
+
+        public static bool IsLarge(long bytes)
+        {
+            return bytes > TailMsgProtocol.LargeImageWarningBytes;
+        }
+
+        // Decodifica a imagem original para colocar na área de transferência.
+        public static bool TryCopyToClipboard(byte[] pngBytes, out string error)
+        {
+            error = "";
+            try
+            {
+                using (MemoryStream buffer = new MemoryStream(pngBytes))
+                using (Image decoded = Image.FromStream(buffer))
+                using (Bitmap copy = new Bitmap(decoded))
+                {
+                    Clipboard.SetImage(copy);
+                }
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
+        }
+    }
+
     internal sealed class MainForm : Form
     {
         private const int SwRestore = 9;
+        // Diâmetro dos botões redondos de microfone (igual à altura do Enviar).
+        private const int MicButtonSize = 44;
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr windowHandle);
@@ -1067,8 +1491,8 @@ namespace TailMsg
         private static extern bool ShowWindow(IntPtr windowHandle, int command);
 
         private readonly FlowLayoutPanel computerList;
-        private readonly TextBox messageBox;
-        private readonly TextBox inboxBox;
+        private readonly MessageTextBox messageBox;
+        private readonly InboxPanel inboxBox;
         private readonly Button sendButton;
         private readonly Button refreshButton;
         private readonly Button updateButton;
@@ -1089,6 +1513,38 @@ namespace TailMsg
         private AboutForm aboutForm;
         private readonly List<ReceivedMessageForm> receivedNotifications =
             new List<ReceivedMessageForm>();
+        private Panel imagePreviewPanel;
+        private Panel imagePreviewBorder;
+        private PictureBox imagePreviewBox;
+        private Label imagePreviewLabel;
+        private TableLayoutPanel contentLayout;
+        private ImagePayload pendingImage;
+        private Bitmap pendingImageThumbnail;
+        private Panel audioPreviewBorder;
+        private AudioTrackPanel audioPreviewPanel;
+        private IconButton recordButton;          // microfone branco
+        private IconButton liveMicButton;         // microfone vermelho
+        private IconButton pauseButton;           // pausa/play do meio
+        private TextBox audioTranscriptionBox;
+        private Panel audioTranscriptionBorder;
+        private WaveRecorder recorder;
+        private System.Windows.Forms.Timer recordingTimer;
+        private AudioPayload pendingAudio;
+        // Quando verdadeiro, o texto da caixa de mensagem é a transcrição do
+        // áudio gravado (apenas informativa: só o áudio é enviado).
+        private bool messageBoxIsTranscription;
+        private bool isRecordingAudio;
+        private bool recordingLive;
+        private bool isPausedAudio;
+        private int diagnosticTicks;
+        // Transcrição incremental do microfone vermelho: texto confirmado
+        // (janelas de 30 s) e rascunho da janela atual.
+        private string liveCommittedText = "";
+        private string liveDraftText = "";
+        private int liveCommitOffset;
+        private int liveLastDraftBytes;
+        private int liveGeneration;
+        private bool liveCommitBusy;
         private List<PeerInfo> latestPeers = new List<PeerInfo>();
         private bool isRefreshing;
         private bool isSending;
@@ -1123,6 +1579,8 @@ namespace TailMsg
             localComputerName = Environment.MachineName;
             networkService = new NetworkService(localComputerName);
             networkService.MessageReceived += NetworkServiceMessageReceived;
+            networkService.ImageReceived += NetworkServiceImageReceived;
+            networkService.AudioReceived += NetworkServiceAudioReceived;
 
             Text = "TailMsg";
             StartPosition = FormStartPosition.CenterScreen;
@@ -1153,6 +1611,15 @@ namespace TailMsg
             footer.BackColor = Color.White;
             Controls.Add(footer);
 
+            // Área de ações: microfone branco, pausa (só durante a gravação),
+            // microfone vermelho e Enviar — os três botões redondos ficam com a
+            // mesma altura do botão Enviar.
+            Panel actionArea = new Panel();
+            actionArea.Dock = DockStyle.Right;
+            actionArea.Width = (MicButtonSize * 3) + 24 + 132 + 12;
+            actionArea.BackColor = Color.White;
+            footer.Controls.Add(actionArea);
+
             sendButton = new Button();
             sendButton.Dock = DockStyle.Right;
             sendButton.Width = 132;
@@ -1165,7 +1632,64 @@ namespace TailMsg
             sendButton.Cursor = Cursors.Hand;
             sendButton.Enabled = false;
             sendButton.Click += SendButtonClick;
-            footer.Controls.Add(sendButton);
+            actionArea.Controls.Add(sendButton);
+
+            // Microfone branco: grava e, ao encerrar, anexa e transcreve.
+            recordButton = new IconButton();
+            recordButton.Width = MicButtonSize;
+            recordButton.AccessibleName = "Gravar áudio";
+            recordButton.Enabled = false;
+            recordButton.Click += delegate { ToggleWhiteMicrophone(); };
+            actionArea.Controls.Add(recordButton);
+
+            // Pausa do meio: aparece somente enquanto algum microfone grava.
+            pauseButton = new IconButton();
+            pauseButton.Width = MicButtonSize;
+            pauseButton.CircleColor = Color.FromArgb(242, 207, 55);
+            pauseButton.CircleOutline = Color.FromArgb(196, 157, 0);
+            // O botão fica sempre no layout (slot fixo, como no SIG); fora da
+            // gravação ele não desenha nada.
+            pauseButton.Glyph = IconGlyph.None;
+            pauseButton.AccessibleName = "Pausar gravação";
+            pauseButton.Click += delegate { ToggleAudioPause(); };
+            actionArea.Controls.Add(pauseButton);
+
+            // Microfone vermelho: grava em janelas e transcreve quase em tempo
+            // real, como o microfone vermelho do SIG.
+            liveMicButton = new IconButton();
+            liveMicButton.Width = MicButtonSize;
+            liveMicButton.AccessibleName = "Gravar com transcrição ao vivo";
+            liveMicButton.Enabled = false;
+            liveMicButton.Click += delegate { ToggleLiveMicrophone(); };
+            actionArea.Controls.Add(liveMicButton);
+
+            bool adjustingMicButtons = false;
+            EventHandler resizeMicButtons = delegate
+            {
+                // Ordem fixa da esquerda para a direita: microfone branco,
+                // pausa e microfone vermelho — todos quadrados, com a altura do
+                // botão Enviar.
+                if (adjustingMicButtons) return;
+                adjustingMicButtons = true;
+                int size = sendButton.Height;
+                if (size > 0)
+                {
+                    int gap = 8;
+                    recordButton.Size = new Size(size, size);
+                    pauseButton.Size = new Size(size, size);
+                    liveMicButton.Size = new Size(size, size);
+                    recordButton.Location = new Point(0, 0);
+                    pauseButton.Location = new Point(size + gap, 0);
+                    liveMicButton.Location = new Point((size + gap) * 2, 0);
+                    actionArea.Width = (size * 3) + (gap * 2) + 12 +
+                        sendButton.Width;
+                }
+                adjustingMicButtons = false;
+            };
+            actionArea.Resize += resizeMicButtons;
+            sendButton.Resize += resizeMicButtons;
+            resizeMicButtons(null, EventArgs.Empty);
+            UpdateRecordButtons();
 
             statusLabel = new Label();
             statusLabel.Dock = DockStyle.Fill;
@@ -1183,16 +1707,20 @@ namespace TailMsg
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.Dock = DockStyle.Fill;
             layout.ColumnCount = 1;
-            layout.RowCount = 8;
+            layout.RowCount = 10;
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 62F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 38F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 34F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 25F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 23F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 37F));
+            // Linhas dos anexos: altura zero enquanto não houver imagem/áudio.
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 43F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
             content.Controls.Add(layout);
+            contentLayout = layout;
 
             updateButton = new Button();
             updateButton.Text = "Atualização disponível";
@@ -1310,13 +1838,8 @@ namespace TailMsg
             inboxLabel.TextAlign = ContentAlignment.BottomLeft;
             layout.Controls.Add(inboxLabel, 0, 3);
 
-            inboxBox = new TextBox();
+            inboxBox = new InboxPanel();
             inboxBox.Dock = DockStyle.Fill;
-            inboxBox.Multiline = true;
-            inboxBox.ReadOnly = true;
-            inboxBox.ScrollBars = ScrollBars.Vertical;
-            inboxBox.BackColor = Color.White;
-            inboxBox.BorderStyle = BorderStyle.FixedSingle;
             inboxBox.Font = new Font("Segoe UI", 9.5F);
             layout.Controls.Add(inboxBox, 0, 4);
 
@@ -1327,7 +1850,7 @@ namespace TailMsg
             messageLabel.TextAlign = ContentAlignment.BottomLeft;
             layout.Controls.Add(messageLabel, 0, 5);
 
-            messageBox = new TextBox();
+            messageBox = new MessageTextBox();
             messageBox.Dock = DockStyle.Fill;
             messageBox.Multiline = true;
             messageBox.ScrollBars = ScrollBars.Vertical;
@@ -1335,14 +1858,101 @@ namespace TailMsg
             messageBox.BorderStyle = BorderStyle.FixedSingle;
             messageBox.MaxLength = TailMsgProtocol.MaxGuiMessageCharacters;
             messageBox.KeyDown += MessageBoxKeyDown;
-            layout.Controls.Add(messageBox, 0, 6);
+            messageBox.UserEdited += delegate { messageBoxIsTranscription = false; };
+            messageBox.ImagePasted += MessageImagePasted;
+            messageBox.ImagePasteFailed += MessageImagePasteFailed;
+            layout.Controls.Add(messageBox, 0, 8);
+
+            Panel previewBorder = new Panel();
+            previewBorder.Dock = DockStyle.Fill;
+            previewBorder.Padding = new Padding(1);
+            previewBorder.BackColor = Color.FromArgb(209, 213, 219);
+            previewBorder.Visible = false;
+            layout.Controls.Add(previewBorder, 0, 6);
+            imagePreviewBorder = previewBorder;
+
+            imagePreviewPanel = new Panel();
+            imagePreviewPanel.Dock = DockStyle.Fill;
+            imagePreviewPanel.BackColor = Color.White;
+            previewBorder.Controls.Add(imagePreviewPanel);
+
+            imagePreviewBox = new PictureBox();
+            imagePreviewBox.Size = new Size(56, 56);
+            imagePreviewBox.Location = new Point(3, 3);
+            imagePreviewBox.SizeMode = PictureBoxSizeMode.Zoom;
+            imagePreviewBox.BackColor = Color.FromArgb(243, 244, 246);
+            imagePreviewPanel.Controls.Add(imagePreviewBox);
+
+            imagePreviewLabel = new Label();
+            imagePreviewLabel.AutoSize = false;
+            imagePreviewLabel.Location = new Point(66, 3);
+            imagePreviewLabel.Size = new Size(imagePreviewPanel.Width - 150, 56);
+            imagePreviewLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            imagePreviewLabel.TextAlign = ContentAlignment.MiddleLeft;
+            imagePreviewLabel.ForeColor = Color.FromArgb(55, 65, 81);
+            imagePreviewPanel.Controls.Add(imagePreviewLabel);
+
+            Button removeImageButton = new Button();
+            removeImageButton.Text = "Remover";
+            removeImageButton.Size = new Size(78, 24);
+            removeImageButton.Location = new Point(300, 19);
+            removeImageButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            removeImageButton.BackColor = Color.FromArgb(55, 65, 81);
+            removeImageButton.ForeColor = Color.White;
+            removeImageButton.FlatStyle = FlatStyle.Flat;
+            removeImageButton.FlatAppearance.BorderSize = 0;
+            removeImageButton.Cursor = Cursors.Hand;
+            removeImageButton.Click += delegate { ClearPendingImage(); };
+            imagePreviewPanel.Controls.Add(removeImageButton);
+            imagePreviewPanel.Resize += delegate
+            {
+                removeImageButton.Location = new Point(
+                    Math.Max(70, imagePreviewPanel.ClientSize.Width - removeImageButton.Width - 8),
+                    Math.Max(1, (imagePreviewPanel.ClientSize.Height - removeImageButton.Height) / 2));
+                imagePreviewLabel.Size = new Size(
+                    Math.Max(40, removeImageButton.Left - imagePreviewLabel.Left - 8),
+                    Math.Max(20, imagePreviewPanel.ClientSize.Height - 6));
+            };
+
+            // Linha do áudio gravado: timeline em cima e a transcrição logo
+            // abaixo, ainda no remetente (antes de enviar).
+            Panel audioBorder = new Panel();
+            audioBorder.Dock = DockStyle.Fill;
+            audioBorder.Padding = new Padding(1);
+            audioBorder.BackColor = Color.FromArgb(209, 213, 219);
+            audioBorder.Visible = false;
+            layout.Controls.Add(audioBorder, 0, 7);
+            audioPreviewBorder = audioBorder;
+
+            // A transcrição fica em um painel com o MESMO contorno e as MESMAS
+            // margens do player (1 px de cada lado): sem o painel, o fundo cinza
+            // da faixa aparecia como um "L" grosso à esquerda e acima da caixa.
+            audioTranscriptionBorder = new Panel();
+            audioTranscriptionBorder.BackColor = Color.FromArgb(209, 213, 219);
+            audioTranscriptionBorder.Padding = new Padding(1);
+            audioTranscriptionBorder.Location = new Point(1, 59);
+            audioTranscriptionBorder.Size = new Size(300, 56);
+            audioTranscriptionBorder.Anchor =
+                AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            audioTranscriptionBorder.Visible = false;
+            audioPreviewBorder.Controls.Add(audioTranscriptionBorder);
+
+            audioTranscriptionBox = new TextBox();
+            audioTranscriptionBox.Multiline = true;
+            audioTranscriptionBox.ReadOnly = true;
+            audioTranscriptionBox.ScrollBars = ScrollBars.Vertical;
+            audioTranscriptionBox.Font = new Font("Segoe UI", 9F);
+            audioTranscriptionBox.BackColor = Color.White;
+            audioTranscriptionBox.BorderStyle = BorderStyle.None;
+            audioTranscriptionBox.Dock = DockStyle.Fill;
+            audioTranscriptionBorder.Controls.Add(audioTranscriptionBox);
 
             Label senderLabel = new Label();
             senderLabel.Dock = DockStyle.Fill;
             senderLabel.ForeColor = Color.FromArgb(107, 114, 128);
             senderLabel.Text = "Será enviada como: " + localComputerName + ": sua mensagem";
             senderLabel.TextAlign = ContentAlignment.BottomLeft;
-            layout.Controls.Add(senderLabel, 0, 7);
+            layout.Controls.Add(senderLabel, 0, 9);
 
             ContextMenu trayMenu = new ContextMenu();
             trayMenu.MenuItems.Add("Abrir TailMsg", delegate { ShowFromTray(); });
@@ -1616,6 +2226,9 @@ namespace TailMsg
             discoveryTimer.Dispose();
             notifyIcon.Visible = false;
             notifyIcon.Dispose();
+            ClearPendingImageThumbnail();
+            ClearPendingAudio();
+            if (recorder != null) { recorder.Dispose(); recorder = null; }
             networkService.Stop();
             base.OnFormClosed(e);
         }
@@ -1974,6 +2587,8 @@ namespace TailMsg
         {
             sendButton.Enabled = !isSending && GetSelectedComputer() != null;
             refreshButton.Enabled = !isSending && !isRefreshing;
+            if (recordButton != null) recordButton.Enabled = !isSending;
+            if (liveMicButton != null) liveMicButton.Enabled = !isSending;
         }
 
         private string GetSelectedAddress()
@@ -2019,12 +2634,763 @@ namespace TailMsg
             SendMessage();
         }
 
+        // Um Ctrl+V de imagem substitui o anexo anterior: cada envio carrega
+        // no máximo uma imagem, além do texto eventualmente digitado.
+        private void MessageImagePasted(object sender, ImagePastedEventArgs e)
+        {
+            if (e == null || e.Image == null) return;
+            SetPendingImage(e.Image);
+        }
+
+        private void MessageImagePasteFailed(object sender, ImagePasteFailedEventArgs e)
+        {
+            if (e == null || String.IsNullOrEmpty(e.ErrorMessage)) return;
+            statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+            statusLabel.Text = e.ErrorMessage;
+        }
+
+        private void SetPendingImage(ImagePayload image)
+        {
+            ClearPendingImageThumbnail();
+            pendingImage = image;
+
+            string error;
+            pendingImageThumbnail = ImageTransfer.CreateThumbnail(
+                image.PngBytes,
+                56,
+                56,
+                out error);
+            imagePreviewBox.Image = pendingImageThumbnail;
+
+            string description = "Imagem anexada: " +
+                ImageTransfer.DescribeDimensions(image.Width, image.Height) +
+                " — " + ImageTransfer.DescribeBytes(image.ByteCount);
+            if (ImageTransfer.IsLarge(image.ByteCount))
+            {
+                description += "  (arquivo grande: o envio pode demorar)";
+                imagePreviewLabel.ForeColor = Color.FromArgb(185, 28, 28);
+            }
+            else
+            {
+                imagePreviewLabel.ForeColor = Color.FromArgb(55, 65, 81);
+            }
+            if (!String.IsNullOrEmpty(error))
+            {
+                description += "  (miniatura indisponível)";
+            }
+            imagePreviewLabel.Text = description;
+
+            ShowImagePreview(true);
+            UpdateActionStates();
+        }
+
+        private void ClearPendingImage()
+        {
+            pendingImage = null;
+            ClearPendingImageThumbnail();
+            ShowImagePreview(false);
+            UpdateActionStates();
+        }
+
+        private void ClearPendingImageThumbnail()
+        {
+            if (pendingImageThumbnail == null) return;
+            imagePreviewBox.Image = null;
+            pendingImageThumbnail.Dispose();
+            pendingImageThumbnail = null;
+        }
+
+        private void ShowImagePreview(bool visible)
+        {
+            if (imagePreviewBorder != null) imagePreviewBorder.Visible = visible;
+            if (contentLayout != null && contentLayout.RowStyles.Count > 6)
+            {
+                contentLayout.RowStyles[6].Height = visible ? 62F : 0F;
+            }
+        }
+
+        // ---- Áudio ---------------------------------------------------------
+
+        // Cores copiadas dos botões do SIG Windows.
+        private static readonly Color SigWhiteCircle = Color.White;
+        private static readonly Color SigWhiteOutline = Color.FromArgb(118, 130, 130);
+        private static readonly Color SigWhiteBody = Color.FromArgb(83, 101, 101);
+        private static readonly Color SigRedCircle = Color.FromArgb(19, 32, 30);
+        private static readonly Color SigRedOutline = Color.FromArgb(44, 64, 61);
+        private static readonly Color SigRedBody = Color.FromArgb(255, 75, 75);
+        private static readonly Color SigRedCapsuleOutline = Color.FromArgb(255, 208, 208);
+        private static readonly Color SigRecordingCircle = Color.FromArgb(61, 21, 21);
+        private static readonly Color SigRecordingOutline = Color.FromArgb(90, 36, 36);
+        private static readonly Color SigCheck = Color.FromArgb(61, 220, 102);
+
+        // Ícones dos três botões conforme o estado (branco, pausa, vermelho).
+        // Ícones em imagem (assets embutidos, 256x256 com transparência),
+        // carregados uma única vez.
+        private static Image whiteMicrophoneImage;
+        private static Image redMicrophoneImage;
+        private static Image pauseImage;
+
+        internal static Image WhiteMicrophoneIcon
+        {
+            get { EnsureAudioIcons(); return whiteMicrophoneImage; }
+        }
+
+        internal static Image RedMicrophoneIcon
+        {
+            get { EnsureAudioIcons(); return redMicrophoneImage; }
+        }
+
+        internal static Image PauseIcon
+        {
+            get { EnsureAudioIcons(); return pauseImage; }
+        }
+
+        internal static void EnsureAudioIconsPublic()
+        {
+            EnsureAudioIcons();
+        }
+
+        private static void EnsureAudioIcons()
+        {
+            if (whiteMicrophoneImage == null)
+            {
+                whiteMicrophoneImage = AppResources.AudioIconWhiteMicrophone();
+            }
+            if (redMicrophoneImage == null)
+            {
+                redMicrophoneImage = AppResources.AudioIconRedMicrophone();
+            }
+            if (pauseImage == null)
+            {
+                pauseImage = AppResources.AudioIconPause();
+            }
+        }
+
+        // Ícones dos três botões conforme o estado (branco, pausa, vermelho).
+        // Enquanto grava, os dois microfones mostram o check verde desenhado.
+        private void UpdateRecordButtons()
+        {
+            if (recordButton == null) return;
+            EnsureAudioIcons();
+
+            bool whiteActive = isRecordingAudio && !recordingLive;
+            bool redActive = isRecordingAudio && recordingLive;
+
+            if (whiteActive)
+            {
+                recordButton.SourceImage = null;
+                recordButton.CircleColor = SigRecordingCircle;
+                recordButton.CircleOutline = SigRecordingOutline;
+                recordButton.Glyph = IconGlyph.Check;
+                recordButton.AccessibleName = "Encerrar gravação";
+            }
+            else
+            {
+                recordButton.SourceImage = whiteMicrophoneImage;
+                recordButton.CircleColor = SigWhiteCircle;
+                recordButton.CircleOutline = SigWhiteOutline;
+                recordButton.Glyph = IconGlyph.None;
+                recordButton.AccessibleName = "Gravar áudio";
+            }
+
+            if (redActive)
+            {
+                liveMicButton.SourceImage = null;
+                liveMicButton.CircleColor = SigRedCircle;
+                liveMicButton.CircleOutline = SigRedOutline;
+                liveMicButton.Glyph = IconGlyph.Check;
+                liveMicButton.AccessibleName = "Encerrar transcrição ao vivo";
+            }
+            else
+            {
+                liveMicButton.SourceImage = redMicrophoneImage;
+                liveMicButton.CircleColor = SigRedCircle;
+                liveMicButton.CircleOutline = SigRedOutline;
+                liveMicButton.Glyph = IconGlyph.None;
+                liveMicButton.AccessibleName = "Gravar com transcrição ao vivo";
+            }
+
+            if (isRecordingAudio && !isPausedAudio)
+            {
+                // Pausar: ícone da pasta de ícones.
+                pauseButton.SourceImage = pauseImage;
+                pauseButton.Glyph = IconGlyph.None;
+                pauseButton.AccessibleName = "Pausar gravação";
+            }
+            else if (isRecordingAudio && isPausedAudio)
+            {
+                // Retomar: círculo amarelo com o triângulo do play.
+                pauseButton.SourceImage = null;
+                pauseButton.CircleColor = Color.FromArgb(242, 207, 55);
+                pauseButton.CircleOutline = Color.FromArgb(196, 157, 0);
+                pauseButton.Glyph = IconGlyph.Play;
+                pauseButton.AccessibleName = "Retomar gravação";
+            }
+            else
+            {
+                pauseButton.SourceImage = null;
+                pauseButton.Glyph = IconGlyph.None;
+                pauseButton.AccessibleName = "";
+            }
+
+            recordButton.Invalidate();
+            liveMicButton.Invalidate();
+            pauseButton.Invalidate();
+        }
+
+        private void ToggleWhiteMicrophone()
+        {
+            if (isRecordingAudio && !recordingLive)
+            {
+                StopAudioRecording("toggle-branco");
+                return;
+            }
+            if (isRecordingAudio) return;
+            StartAudioRecording(false);
+        }
+
+        private void ToggleLiveMicrophone()
+        {
+            if (isRecordingAudio && recordingLive)
+            {
+                StopAudioRecording("toggle-vermelho");
+                return;
+            }
+            if (isRecordingAudio) return;
+            StartAudioRecording(true);
+        }
+
+        private void ToggleAudioPause()
+        {
+            if (!isRecordingAudio || recorder == null) return;
+
+            string error;
+            if (isPausedAudio)
+            {
+                if (!recorder.Resume(out error))
+                {
+                    statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                    statusLabel.Text = error;
+                    return;
+                }
+                isPausedAudio = false;
+            }
+            else
+            {
+                if (!recorder.Pause(out error))
+                {
+                    statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                    statusLabel.Text = error;
+                    return;
+                }
+                isPausedAudio = true;
+            }
+            TailMsgDiagnostics.WriteMessageEvent(
+                TailMsgDiagnostics.CreateOperationId(),
+                "audio_recording",
+                isPausedAudio ? "paused" : "resumed",
+                localComputerName,
+                "",
+                "",
+                0,
+                "");
+            UpdateRecordButtons();
+            UpdateRecordingStatus();
+        }
+
+        private void StartAudioRecording(bool live)
+        {
+            if (isSending || isRecordingAudio) return;
+
+            WaveRecorder candidate = new WaveRecorder();
+            string error;
+            if (!candidate.Start(out error))
+            {
+                candidate.Dispose();
+                statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                statusLabel.Text = error;
+                MessageBox.Show(
+                    this,
+                    error,
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            recorder = candidate;
+            isRecordingAudio = true;
+            recordingLive = live;
+            isPausedAudio = false;
+            diagnosticTicks = 0;
+            TailMsgDiagnostics.WriteMessageEvent(
+                TailMsgDiagnostics.CreateOperationId(),
+                "audio_recording",
+                "started",
+                localComputerName,
+                "",
+                "",
+                0,
+                "modo=" + (live ? "live" : "normal"));
+
+            if (live)
+            {
+                liveCommittedText = "";
+                liveDraftText = "";
+                liveCommitOffset = 0;
+                liveLastDraftBytes = 0;
+                liveGeneration++;
+                liveCommitBusy = false;
+                // A caixa da transcrição precisa estar visível durante a
+                // gravação: os trechos vão aparecendo nela em tempo real.
+                ShowAudioPreview(true);
+                ShowAudioTranscription("Transcrevendo ao vivo... aguarde o primeiro trecho.");
+            }
+            else
+            {
+                ShowAudioPreview(true);
+                ShowAudioTranscription("");
+            }
+
+            UpdateRecordButtons();
+            if (recordingTimer == null)
+            {
+                recordingTimer = new System.Windows.Forms.Timer();
+                recordingTimer.Interval = 250;
+                recordingTimer.Tick += delegate { UpdateRecordingStatus(); };
+            }
+            recordingTimer.Start();
+            UpdateRecordingStatus();
+        }
+
+        private void UpdateRecordingStatus()
+        {
+            if (!isRecordingAudio || recorder == null) return;
+
+            int seconds = (int)Math.Round(recorder.ElapsedSeconds);
+            string liveLabel = recordingLive ? " (transcrição ao vivo)" : "";
+            statusLabel.ForeColor = isPausedAudio
+                ? Color.FromArgb(180, 83, 9)
+                : Color.FromArgb(185, 28, 28);
+            statusLabel.Text = (isPausedAudio ? "Gravação pausada em " : "Gravando ") +
+                FormatDuration(seconds) + liveLabel +
+                " — clique no check verde para encerrar e anexar.";
+
+            if (recorder.LimitReached)
+            {
+                StopAudioRecording("limite");
+                statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                statusLabel.Text = "Limite de gravação de " +
+                    (TailMsgProtocol.MaximumAudioSeconds / 60) +
+                    " minutos atingido; áudio anexado.";
+                return;
+            }
+
+            // Diagnóstico: a cada ~2,5 s registra quanto áudio foi capturado.
+            // Se o valor estagnar, o driver parou de entregar buffers.
+            diagnosticTicks++;
+            if (diagnosticTicks % 10 == 0)
+            {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    TailMsgDiagnostics.CreateOperationId(),
+                    "audio_capture",
+                    "progress",
+                    localComputerName,
+                    "",
+                    "",
+                    0,
+                    "capturado_ms=" + (recorder.CapturedBytes * 1000L /
+                        (TailMsgProtocol.AudioSampleRate *
+                         TailMsgProtocol.AudioChannels *
+                         (TailMsgProtocol.AudioBitsPerSample / 8))) +
+                        ";relogio_ms=" + (int)(recorder.ElapsedSeconds * 1000) +
+                        ";reciclados=" + recorder.RequeuedBuffers +
+                        ";falhas=" + recorder.RequeueFailures +
+                        ";erro=" + recorder.LastRequeueError +
+                        ";flags=" + recorder.LastRequeueFlags +
+                        ";prepare=" + recorder.LastPrepareError +
+                        ";fila=" + recorder.QueueDepth +
+                    ";janela_ms=" + ((recorder.CapturedBytes - liveCommitOffset) * 1000L /
+                        (TailMsgProtocol.AudioSampleRate *
+                         TailMsgProtocol.AudioChannels *
+                         (TailMsgProtocol.AudioBitsPerSample / 8))));
+            }
+
+            if (recordingLive) UpdateLiveTranscription();
+        }
+
+        private void StopAudioRecording()
+        {
+            StopAudioRecording("desconhecido");
+        }
+
+        private void StopAudioRecording(string reason)
+        {
+            if (!isRecordingAudio || recorder == null) return;
+            bool wasLive = recordingLive;
+
+            // A janela em aberto precisa ser copiada ANTES de fechar o
+            // gravador: depois do Stop não há mais bytes para transcrever.
+            byte[] liveTail = null;
+            if (wasLive)
+            {
+                liveTail = recorder.SnapshotFrom(liveCommitOffset);
+            }
+
+            if (recordingTimer != null) recordingTimer.Stop();
+            TailMsgDiagnostics.WriteMessageEvent(
+                TailMsgDiagnostics.CreateOperationId(),
+                "audio_recording",
+                "stopped",
+                localComputerName,
+                "",
+                "",
+                0,
+                "modo=" + (recordingLive ? "live" : "normal") +
+                    ";segundos=" + (int)Math.Round(recorder.ElapsedSeconds) +
+                    ";origem=" + reason);
+            isRecordingAudio = false;
+            recordingLive = false;
+            isPausedAudio = false;
+            AudioPayload payload = recorder.Stop();
+            recorder.Dispose();
+            recorder = null;
+
+            UpdateRecordButtons();
+
+            if (payload == null)
+            {
+                statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                statusLabel.Text = "A gravação ficou curta demais e foi descartada.";
+                ShowAudioTranscription("");
+                return;
+            }
+
+            SetPendingAudio(payload);
+            if (wasLive)
+            {
+                // Fecha a janela em aberto com uma transcrição final.
+                if (liveTail != null && liveTail.Length >= BytesForMillis(400))
+                {
+                    SendFinalLiveWindow(liveTail);
+                }
+                liveCommitOffset = 0;
+                liveLastDraftBytes = 0;
+            }
+            else
+            {
+                StartAudioTranscription(payload);
+            }
+        }
+
+        private void SetPendingAudio(AudioPayload audio)
+        {
+            pendingAudio = audio;
+            ClearAudioPreviewPanel();
+
+            AudioTrackPanel panel = new AudioTrackPanel(audio, true);
+            panel.Location = new Point(1, 1);
+            panel.Size = new Size(
+                Math.Max(120, audioPreviewBorder.ClientSize.Width - 2),
+                54);
+            panel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            panel.RemoveRequested += delegate { ClearPendingAudio(); };
+            panel.PlaybackFailed += delegate(object sender, EventArgs e)
+            {
+                PlaybackFailedEventArgs failure = e as PlaybackFailedEventArgs;
+                statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                statusLabel.Text = failure == null
+                    ? "Não foi possível tocar o áudio."
+                    : failure.ErrorMessage;
+            };
+            audioPreviewPanel = panel;
+            audioPreviewBorder.Controls.Add(panel);
+            panel.BringToFront();
+
+            ShowAudioPreview(true);
+            UpdateActionStates();
+            statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+            statusLabel.Text = "Áudio anexado (" +
+                FormatDuration(audio.DurationMilliseconds / 1000) +
+                "). Use Enviar para mandar, ou Remover para descartar.";
+        }
+
+        private void ClearPendingAudio()
+        {
+            pendingAudio = null;
+            ShowAudioPreview(false);
+            ClearAudioPreviewPanel();
+            ShowAudioTranscription("");
+            messageBoxIsTranscription = false;
+            UpdateActionStates();
+        }
+
+        private void ClearAudioPreviewPanel()
+        {
+            if (audioPreviewPanel == null) return;
+            AudioTrackPanel panel = audioPreviewPanel;
+            audioPreviewPanel = null;
+            panel.StopPlayback();
+            if (audioPreviewBorder != null &&
+                audioPreviewBorder.Controls.Contains(panel))
+            {
+                audioPreviewBorder.Controls.Remove(panel);
+            }
+            panel.Dispose();
+        }
+
+        private void ShowAudioPreview(bool visible)
+        {
+            if (audioPreviewBorder != null) audioPreviewBorder.Visible = visible;
+            if (contentLayout != null && contentLayout.RowStyles.Count > 7)
+            {
+                // A faixa cresce para caber a transcrição do remetente.
+                contentLayout.RowStyles[7].Height = visible ? 117F : 0F;
+            }
+        }
+
+        // ---- Transcrição do áudio gravado (remetente) ----------------------
+
+        // A transcrição aparece na caixa onde a mensagem é digitada (além da
+        // faixa do áudio). Só o áudio é enviado — o destinatário transcreve no
+        // computador dele.
+        private void SetAudioTranscriptionText(string transcription)
+        {
+            if (messageBox == null) return;
+            string text = transcription == null ? "" : transcription.Trim();
+            messageBoxIsTranscription = text.Length > 0;
+            messageBox.SetProgrammaticText(text);
+        }
+
+        private void ShowAudioTranscription(string text)
+        {
+            if (audioTranscriptionBox == null) return;
+            string value = text == null ? "" : text;
+            audioTranscriptionBox.Text = value;
+            bool visible = value.Length > 0;
+            audioTranscriptionBox.Visible = visible;
+            if (audioTranscriptionBorder != null)
+            {
+                audioTranscriptionBorder.Visible = visible;
+            }
+            audioTranscriptionBox.SelectionStart = audioTranscriptionBox.TextLength;
+            audioTranscriptionBox.ScrollToCaret();
+        }
+
+        private string LiveTranscriptionText()
+        {
+            string committed = liveCommittedText.Trim();
+            string draft = liveDraftText.Trim();
+            if (draft.Length == 0) return committed;
+            if (committed.Length == 0) return draft;
+            return committed + " " + draft;
+        }
+
+        // Microfone branco: transcreve o áudio já encerrado, uma única vez.
+        private void StartAudioTranscription(AudioPayload audio)
+        {
+            if (audio == null || audio.WavBytes == null) return;
+            byte[] wavBytes = audio.WavBytes;
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            ShowAudioTranscription("Transcrevendo...");
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text;
+                string error;
+                bool ok = TranscriptionClient.TryTranscribe(
+                    wavBytes,
+                    "audio.wav",
+                    operationId,
+                    out text,
+                    out error);
+                TryBeginInvoke(delegate
+                {
+                    if (ok)
+                    {
+                        ShowAudioTranscription(text);
+                        SetAudioTranscriptionText(text);
+                        TranscriptionCache.Remember(operationId, text);
+                    }
+                    else
+                    {
+                        ShowAudioTranscription("Não foi possível transcrever: " + error);
+                    }
+                });
+            });
+        }
+
+        // Microfone vermelho: a cada 1 s manda a janela em aberto (o rascunho
+        // substitui o anterior) e a cada 10 s confirma o que já foi transcrito,
+        // recomeçando a janela — o mesmo ritmo do SIG.
+        private const int LiveCommitMillis = 10000;
+        private const int LiveDraftMillis = 1000;
+
+        private void UpdateLiveTranscription()
+        {
+            if (recorder == null) return;
+
+            int captured = recorder.CapturedBytes;
+            int windowBytes = captured - liveCommitOffset;
+            if (windowBytes < BytesForMillis(300)) return;
+
+            // Janela cheia: confirma o texto e reinicia do ponto atual.
+            if (windowBytes >= BytesForMillis(LiveCommitMillis) && !liveCommitBusy)
+            {
+                liveCommitBusy = true;
+                liveLastDraftBytes = captured;
+                SendLiveWindow(windowBytes, true);
+                return;
+            }
+
+            // Fora do commit: manda a janela inteira a cada segundo; a resposta
+            // substitui o rascunho anterior.
+            if (captured - liveLastDraftBytes >= BytesForMillis(LiveDraftMillis))
+            {
+                liveLastDraftBytes = captured;
+                SendLiveWindow(windowBytes, false);
+            }
+        }
+
+        // Envia a janela atual (do último commit até agora). Os rascunhos não
+        // bloqueiam uns aos outros: a geração descarta resposta atrasada.
+        private void SendLiveWindow(int windowBytes, bool commit)
+        {
+            if (recorder == null) return;
+            byte[] pcm = recorder.SnapshotFrom(liveCommitOffset);
+            if (pcm == null || pcm.Length < BytesForMillis(300)) return;
+
+            byte[] wav = WaveRecorder.WrapPcm(pcm);
+            if (wav == null) return;
+
+            int generation = ++liveGeneration;
+            int commitEndBytes = liveCommitOffset + windowBytes;
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text;
+                string error;
+                bool ok = TranscriptionClient.TryTranscribe(
+                    wav,
+                    "audio.wav",
+                    operationId,
+                    out text,
+                    out error);
+
+                TryBeginInvoke(delegate
+                {
+                    if (commit)
+                    {
+                        liveCommitBusy = false;
+                        if (!ok)
+                        {
+                            // Tenta de novo na próxima verificação.
+                            liveLastDraftBytes = liveCommitOffset;
+                            return;
+                        }
+                        liveCommittedText = AppendLine(liveCommittedText, text);
+                        liveDraftText = "";
+                        liveCommitOffset = commitEndBytes;
+                        liveLastDraftBytes = commitEndBytes;
+                        TranscriptionCache.Remember(operationId, text);
+                        ShowAudioTranscription(LiveTranscriptionText());
+                        SetAudioTranscriptionText(LiveTranscriptionText());
+                        return;
+                    }
+
+                    // Rascunho obsoleto (já existe outro mais novo) é ignorado.
+                    if (generation != liveGeneration) return;
+                    if (!ok)
+                    {
+                        if (liveCommittedText.Length == 0 && liveDraftText.Length == 0)
+                        {
+                            ShowAudioTranscription("Não foi possível transcrever: " + error);
+                        }
+                        return;
+                    }
+                    liveDraftText = text;
+                    ShowAudioTranscription(LiveTranscriptionText());
+                    SetAudioTranscriptionText(LiveTranscriptionText());
+                });
+            });
+        }
+
+        // Confirmação final com os bytes copiados antes de fechar o gravador.
+        private void SendFinalLiveWindow(byte[] pcm)
+        {
+            byte[] wav = WaveRecorder.WrapPcm(pcm);
+            if (wav == null) return;
+            int generation = ++liveGeneration;
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text;
+                string error;
+                bool ok = TranscriptionClient.TryTranscribe(
+                    wav,
+                    "audio.wav",
+                    operationId,
+                    out text,
+                    out error);
+                TryBeginInvoke(delegate
+                {
+                    if (ok)
+                    {
+                        liveCommittedText = AppendLine(liveCommittedText, text);
+                        liveDraftText = "";
+                        TranscriptionCache.Remember(operationId, text);
+                    }
+                    else if (liveCommittedText.Length == 0 && liveDraftText.Length == 0)
+                    {
+                        ShowAudioTranscription("Não foi possível transcrever: " + error);
+                    }
+                    ShowAudioTranscription(LiveTranscriptionText());
+                    SetAudioTranscriptionText(LiveTranscriptionText());
+                });
+            });
+        }
+
+        private static string AppendLine(string current, string addition)
+        {
+            string text = (current ?? "").Trim();
+            string extra = (addition ?? "").Trim();
+            if (extra.Length == 0) return text;
+            if (text.Length == 0) return extra;
+            return text + " " + extra;
+        }
+
+        private static int BytesForMillis(int millis)
+        {
+            return (millis * TailMsgProtocol.AudioSampleRate *
+                TailMsgProtocol.AudioChannels *
+                (TailMsgProtocol.AudioBitsPerSample / 8)) / 1000;
+        }
+
+        private static string FormatDuration(int seconds)
+        {
+            if (seconds < 0) seconds = 0;
+            return (seconds / 60).ToString(CultureInfo.InvariantCulture) + ":" +
+                (seconds % 60).ToString("00", CultureInfo.InvariantCulture);
+        }
+
         private void SendMessage()
         {
             if (isSending) return;
 
+            // Enviar durante a gravação: a captura é encerrada na hora, o
+            // áudio entra como anexo e a mensagem segue normalmente.
+            if (isRecordingAudio)
+            {
+                StopAudioRecording("envio");
+            }
+
             PeerInfo computer = GetSelectedComputer();
-            string message = messageBox.Text.Trim();
+            // A transcrição exibida na caixa é apenas informativa: o que viaja
+            // é o áudio (o destinatário transcreve no computador dele).
+            string message = messageBoxIsTranscription ? "" : messageBox.Text.Trim();
+            ImagePayload image = pendingImage;
+            AudioPayload audio = pendingAudio;
 
             if (computer == null)
             {
@@ -2032,10 +3398,40 @@ namespace TailMsg
                 return;
             }
 
-            if (String.IsNullOrEmpty(message))
+            if (String.IsNullOrEmpty(message) && image == null && audio == null)
             {
-                MessageBox.Show(this, "Digite a mensagem que deseja enviar.", "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "Digite a mensagem, cole uma imagem com Ctrl+V ou grave um áudio.", "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 messageBox.Focus();
+                return;
+            }
+
+            if (image != null && !computer.SupportsImages)
+            {
+                MessageBox.Show(
+                    this,
+                    "O computador " + computer.Name +
+                    " usa uma versão do TailMsg sem suporte a imagens." +
+                    (message.Length > 0
+                        ? " Somente o texto pode ser enviado."
+                        : " A imagem não será enviada."),
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            if (audio != null && !computer.SupportsAudio)
+            {
+                MessageBox.Show(
+                    this,
+                    "O computador " + computer.Name +
+                    " usa uma versão do TailMsg sem suporte a áudio." +
+                    (message.Length > 0
+                        ? " Somente o texto pode ser enviado."
+                        : " O áudio não será enviado."),
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
                 return;
             }
 
@@ -2044,29 +3440,108 @@ namespace TailMsg
             statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
             statusLabel.Text = "Enviando para " + computer.Name + " (" + computer.Address + ")...";
 
+            // Texto, imagem e áudio viajam como mensagens separadas, nesta
+            // ordem, para o destinatário usar o botão que quiser.
             ThreadPool.QueueUserWorkItem(delegate
             {
-                MessageSendResult result = MessageSender.Send(computer, localComputerName, message);
+                bool sentText = false;
+                bool sentImage = false;
+                bool sentAudio = false;
+                string failure = "";
+
+                if (message.Length > 0)
+                {
+                    MessageSendResult textResult = MessageSender.Send(
+                        computer,
+                        localComputerName,
+                        message);
+                    sentText = textResult.Success;
+                    if (!textResult.Success) failure = textResult.ErrorMessage;
+                }
+
+                if (failure.Length == 0 && image != null)
+                {
+                    MessageSendResult imageResult = MessageSender.SendImage(
+                        computer,
+                        localComputerName,
+                        image);
+                    sentImage = imageResult.Success;
+                    if (!imageResult.Success) failure = imageResult.ErrorMessage;
+                }
+
+                if (failure.Length == 0 && audio != null)
+                {
+                    MessageSendResult audioResult = MessageSender.SendAudio(
+                        computer,
+                        localComputerName,
+                        audio);
+                    sentAudio = audioResult.Success;
+                    if (!audioResult.Success) failure = audioResult.ErrorMessage;
+                }
+
                 TryBeginInvoke(delegate
                 {
                     isSending = false;
+
+                    // O que já foi entregue sai da tela para não ser reenviado
+                    // sem querer em uma nova tentativa.
+                    if (sentText) messageBox.Clear();
+                    if (sentImage) ClearPendingImage();
+                    if (sentAudio)
+                    {
+                        ClearPendingAudio();
+                        // A transcrição sai da caixa junto com o áudio.
+                        messageBoxIsTranscription = false;
+                        messageBox.SetProgrammaticText("");
+                    }
+
                     UpdateActionStates();
 
-                    if (result.Success)
+                    if (failure.Length == 0)
                     {
                         statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
-                        statusLabel.Text = "Mensagem entregue a " + computer.Name + ".";
-                        messageBox.Clear();
+                        statusLabel.Text = DescribeDelivery(
+                            computer.Name,
+                            sentText,
+                            sentImage,
+                            sentAudio);
                         messageBox.Focus();
                     }
                     else
                     {
                         statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
                         statusLabel.Text = "Falha ao enviar para " + computer.Name + ".";
-                        MessageBox.Show(this, result.ErrorMessage, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show(this, failure, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                 });
             });
+        }
+
+        private static string DescribeDelivery(
+            string computerName,
+            bool sentText,
+            bool sentImage,
+            bool sentAudio)
+        {
+            int attachments = (sentImage ? 1 : 0) + (sentAudio ? 1 : 0);
+            if (!sentText && attachments == 0)
+            {
+                return "Nada foi enviado para " + computerName + ".";
+            }
+            if (!sentText && attachments == 1)
+            {
+                return (sentImage ? "Imagem entregue a " : "Áudio entregue a ") +
+                    computerName + ".";
+            }
+
+            StringBuilder text = new StringBuilder();
+            if (sentText) text.Append("Mensagem");
+            if (sentImage) text.Append(text.Length == 0 ? "Imagem" : " e imagem");
+            if (sentAudio) text.Append(text.Length == 0 ? "Áudio" : " e áudio");
+            text.Append(" entregue");
+            if (sentText && attachments > 0) text.Append("s");
+            text.Append(" a ").Append(computerName).Append(".");
+            return text.ToString();
         }
 
         private void NetworkServiceMessageReceived(object sender, MessageReceivedEventArgs e)
@@ -2113,17 +3588,211 @@ namespace TailMsg
                     e,
                     localComputerName,
                     delegate { ShowFromTray(); });
+                notification.PeerCapabilityLookup = networkService.FindPeerCapabilities;
+                notification.StatusReporter = delegate(string text, bool isError)
+                {
+                    statusLabel.ForeColor = isError
+                        ? Color.FromArgb(185, 28, 28)
+                        : Color.FromArgb(21, 128, 61);
+                    statusLabel.Text = text;
+                };
                 receivedNotifications.Add(notification);
                 notification.FormClosed += delegate
                 {
                     receivedNotifications.Remove(notification);
                     RepositionNotifications();
                 };
+                // O popup cresce ao anexar uma imagem na resposta; o
+                // empilhamento acompanha.
+                notification.SizeChanged += delegate { RepositionNotifications(); };
                 RepositionNotifications();
                 notification.Show();
                 RepositionNotifications();
                 statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                 statusLabel.Text = "Nova mensagem recebida de " + e.SenderName + ".";
+            });
+        }
+
+        private void NetworkServiceImageReceived(object sender, ImageReceivedEventArgs e)
+        {
+            if (IsDisposed)
+            {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    e.OperationId,
+                    "ui_image_received",
+                    "dropped",
+                    e.SenderName,
+                    e.RemoteAddress,
+                    e.Fingerprint,
+                    0,
+                    "form-disposed");
+                return;
+            }
+
+            TailMsgDiagnostics.WriteMessageEvent(
+                e.OperationId,
+                "ui_image_queued",
+                "success",
+                e.SenderName,
+                e.RemoteAddress,
+                e.Fingerprint,
+                0,
+                "");
+
+            TryBeginInvoke(delegate
+            {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    e.OperationId,
+                    "ui_image_shown",
+                    "success",
+                    e.SenderName,
+                    e.RemoteAddress,
+                    e.Fingerprint,
+                    0,
+                    "");
+
+                // O inbox continua sendo texto simples: a imagem entra como
+                // resumo e o conteúdo real fica no popup com o botão Copiar.
+                string summary = "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
+                    e.SenderName + " (" + e.RemoteAddress + "): [imagem " +
+                    ImageTransfer.DescribeDimensions(e.Width, e.Height) + ", " +
+                    ImageTransfer.DescribeBytes(
+                        e.ImageBytes == null ? 0 : e.ImageBytes.Length) + "]" +
+                    Environment.NewLine;
+                inboxBox.AppendText(summary);
+
+                ReceivedMessageForm notification = new ReceivedMessageForm(
+                    e,
+                    localComputerName,
+                    delegate { ShowFromTray(); });
+                notification.PeerCapabilityLookup = networkService.FindPeerCapabilities;
+                notification.StatusReporter = delegate(string text, bool isError)
+                {
+                    statusLabel.ForeColor = isError
+                        ? Color.FromArgb(185, 28, 28)
+                        : Color.FromArgb(21, 128, 61);
+                    statusLabel.Text = text;
+                };
+                receivedNotifications.Add(notification);
+                notification.FormClosed += delegate
+                {
+                    receivedNotifications.Remove(notification);
+                    RepositionNotifications();
+                };
+                notification.SizeChanged += delegate { RepositionNotifications(); };
+                RepositionNotifications();
+                notification.Show();
+                RepositionNotifications();
+                statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+                statusLabel.Text = "Imagem recebida de " + e.SenderName + ".";
+            });
+        }
+
+        private void NetworkServiceAudioReceived(object sender, AudioReceivedEventArgs e)
+        {
+            if (IsDisposed)
+            {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    e.OperationId,
+                    "ui_audio_received",
+                    "dropped",
+                    e.SenderName,
+                    e.RemoteAddress,
+                    e.Fingerprint,
+                    0,
+                    "form-disposed");
+                return;
+            }
+
+            TailMsgDiagnostics.WriteMessageEvent(
+                e.OperationId,
+                "ui_audio_queued",
+                "success",
+                e.SenderName,
+                e.RemoteAddress,
+                e.Fingerprint,
+                0,
+                "");
+
+            TryBeginInvoke(delegate
+            {
+                TailMsgDiagnostics.WriteMessageEvent(
+                    e.OperationId,
+                    "ui_audio_shown",
+                    "success",
+                    e.SenderName,
+                    e.RemoteAddress,
+                    e.Fingerprint,
+                    0,
+                    "");
+
+                AudioPayload inboxAudio = new AudioPayload();
+                inboxAudio.WavBytes = e.AudioBytes;
+                inboxAudio.DurationMilliseconds = e.DurationMilliseconds;
+                InboxAudioRow audioRow = inboxBox.AppendAudio(
+                    "[" + DateTime.Now.ToString("HH:mm:ss") + "] " +
+                    e.SenderName + " (" + e.RemoteAddress + "): [áudio " +
+                    FormatDuration(e.DurationMilliseconds / 1000) + "]",
+                    inboxAudio,
+                    e.OperationId);
+                StartInboxTranscription(audioRow);
+
+                ReceivedMessageForm notification = new ReceivedMessageForm(
+                    e,
+                    localComputerName,
+                    delegate { ShowFromTray(); });
+                notification.PeerCapabilityLookup = networkService.FindPeerCapabilities;
+                notification.StatusReporter = delegate(string text, bool isError)
+                {
+                    statusLabel.ForeColor = isError
+                        ? Color.FromArgb(185, 28, 28)
+                        : Color.FromArgb(21, 128, 61);
+                    statusLabel.Text = text;
+                };
+                receivedNotifications.Add(notification);
+                notification.FormClosed += delegate
+                {
+                    receivedNotifications.Remove(notification);
+                    RepositionNotifications();
+                };
+                notification.SizeChanged += delegate { RepositionNotifications(); };
+                RepositionNotifications();
+                notification.Show();
+                RepositionNotifications();
+                statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+                statusLabel.Text = "Áudio recebido de " + e.SenderName + ".";
+            });
+        }
+
+        // Transcreve o áudio recebido para o histórico (e alimenta o cache que
+        // o popup usa, para não transcrever duas vezes).
+        private void StartInboxTranscription(InboxAudioRow row)
+        {
+            if (row == null) return;
+            string operationId = row.OperationId;
+            string cached;
+            if (TranscriptionCache.TryGet(operationId, out cached))
+            {
+                row.SetTranscription(cached);
+                return;
+            }
+
+            byte[] audioBytes = row.Audio == null ? null : row.Audio.WavBytes;
+            if (audioBytes == null || audioBytes.Length == 0) return;
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text;
+                string error;
+                bool ok = TranscriptionClient.TryTranscribe(
+                    audioBytes,
+                    "audio.wav",
+                    operationId,
+                    out text,
+                    out error);
+                if (!ok) return;
+                TranscriptionCache.Remember(operationId, text);
+                TryBeginInvoke(delegate { row.SetTranscription(text); });
             });
         }
 
@@ -2197,29 +3866,154 @@ namespace TailMsg
         private const int WsExToolWindow = 0x00000080;
         private static readonly bool runningUnderWine = WineEnvironment.IsWine;
         private readonly MessageReceivedEventArgs message;
+        private readonly ImageReceivedEventArgs imageMessage;
+        private readonly AudioReceivedEventArgs audioMessage;
         private readonly string localComputerName;
         private readonly Action openMainWindow;
         private readonly TextBox contentBox;
-        private readonly TextBox replyBox;
+        private readonly MessageTextBox replyBox;
         private readonly Button copyButton;
         private readonly Button replyButton;
         private readonly Button transparencyButton;
         private readonly ContextMenuStrip transparencyMenu;
         private readonly Font transparencyRegularFont;
         private readonly Font transparencySelectedFont;
+        private readonly Bitmap imageThumbnail;
+        private readonly string imageThumbnailError;
+        private Panel replyAttachmentBorder;
+        private Panel replyAudioBorder;
+        private PictureBox replyAttachmentBox;
+        private Label replyAttachmentLabel;
+        private Label replyLabel;
+        private Bitmap replyAttachmentThumbnail;
+        private ImagePayload pendingReplyImage;
+        private int baseReplyButtonTop;
+        private int baseTransparencyButtonTop;
+        private int basePopupHeight;
+        private bool replySupportsImages;
+        private AudioTrackPanel audioPanel;
+        private bool transcriptionInProgress;
+        private Button retryTranscriptionButton;
+        // Resposta com áudio: os mesmos três botões do painel principal,
+        // quadrados com a altura do botão Enviar do popup.
+        private IconButton replyMicButton;
+        private IconButton replyPauseButton;
+        private IconButton replyLiveMicButton;
+        private WaveRecorder replyRecorder;
+        private System.Windows.Forms.Timer replyRecordingTimer;
+        private bool replyRecording;
+        private bool replyRecordingLive;
+        private bool replyPaused;
+        private AudioPayload replyAudio;
+        private TextBox replyAudioBox;
+        private Label replyAudioLabel;
+        private Button replyAudioRemoveButton;
+        private string replyCommittedText = "";
+        private string replyDraftText = "";
+        private int replyCommitOffset;
+        private int replyLastDraftBytes;
+        private int replyGeneration;
+        private bool replyCommitBusy;
+        private int replyDiagnosticTicks;
+        private int replyToolsTop;
+        // A transcrição do áudio que gravamos para responder fica na caixa de
+        // digitação, apenas informativa (só o áudio é enviado).
+        private bool replyBoxIsTranscription;
+        // Preenchidos conforme o tipo de popup: texto ou imagem.
+        private readonly string senderName;
+        private readonly string remoteAddress;
+        // O popup de imagem espelha o popup de texto: mesma altura, mesmos
+        // botões nas mesmas posições; a miniatura ocupa a área de conteúdo.
+        private const int PopupHeight = 248;
+        // O popup de áudio reserva espaço para a timeline e a transcrição.
+        private const int AudioPopupHeight = 305;
+        private const int AttachmentBandHeight = 62;
+
+        // Consulta de capacidade do remetente, fornecida pela janela
+        // principal. Sem ela, o anexo na resposta seria recusado sempre.
+        internal Func<string, int> PeerCapabilityLookup;
+
+        // Retorno do resultado na barra de status da janela principal, já que
+        // o popup fecha quando a resposta é entregue.
+        internal Action<string, bool> StatusReporter;
 
         public ReceivedMessageForm(
             MessageReceivedEventArgs message,
             string localComputerName,
             Action openMainWindow)
+            : this(message, null, null, localComputerName, openMainWindow)
+        {
+        }
+
+        public ReceivedMessageForm(
+            ImageReceivedEventArgs image,
+            string localComputerName,
+            Action openMainWindow)
+            : this(null, image, null, localComputerName, openMainWindow)
+        {
+        }
+
+        public ReceivedMessageForm(
+            AudioReceivedEventArgs audio,
+            string localComputerName,
+            Action openMainWindow)
+            : this(null, null, audio, localComputerName, openMainWindow)
+        {
+        }
+
+        private ReceivedMessageForm(
+            MessageReceivedEventArgs message,
+            ImageReceivedEventArgs image,
+            AudioReceivedEventArgs audio,
+            string localComputerName,
+            Action openMainWindow)
         {
             this.message = message;
+            this.imageMessage = image;
+            this.audioMessage = audio;
             this.localComputerName = localComputerName;
             this.openMainWindow = openMainWindow;
 
+            bool isImage = image != null;
+            bool hasAudio = audio != null;
+            if (hasAudio)
+            {
+                senderName = audio.SenderName;
+                remoteAddress = audio.RemoteAddress;
+            }
+            else if (isImage)
+            {
+                senderName = image.SenderName;
+                remoteAddress = image.RemoteAddress;
+            }
+            else
+            {
+                senderName = message.SenderName;
+                remoteAddress = message.RemoteAddress;
+            }
+
+            // Quem nos enviou uma imagem comprovadamente aceita imagens; nos
+            // outros casos a resposta só anexa se a descoberta anunciar a
+            // capacidade (consultada pela janela principal).
+            replySupportsImages = isImage;   // refinado abaixo, se houver consulta
+
+            if (isImage)
+            {
+                imageThumbnail = ImageTransfer.CreateThumbnail(
+                    image.ImageBytes,
+                    408,
+                    52,
+                    out imageThumbnailError);
+            }
+            else
+            {
+                imageThumbnail = null;
+                imageThumbnailError = "";
+            }
+
             Text = "Mensagem recebida - TailMsg";
             StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(420, 248);
+            ClientSize = new Size(420, hasAudio ? AudioPopupHeight : PopupHeight);
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             ShowIcon = false;
@@ -2273,7 +4067,7 @@ namespace TailMsg
 
             Label sender = new Label();
             sender.AutoSize = false;
-            sender.Text = "De: " + message.SenderName + "  (" + message.RemoteAddress + ")";
+            sender.Text = "De: " + senderName + "  (" + remoteAddress + ")";
             sender.TextAlign = ContentAlignment.MiddleLeft;
             sender.ForeColor = Color.FromArgb(209, 213, 219);
             sender.Location = new Point(10, 43);
@@ -2281,41 +4075,193 @@ namespace TailMsg
             sender.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             body.Controls.Add(sender);
 
-            contentBox = new TextBox();
-            contentBox.Multiline = true;
-            contentBox.ReadOnly = true;
-            contentBox.ScrollBars = ScrollBars.Vertical;
-            contentBox.Font = new Font("Segoe UI", 10F);
-            contentBox.BackColor = Color.White;
-            contentBox.Text = message.Message;
-            contentBox.Location = new Point(5, 65);
-            contentBox.Size = new Size(body.ClientSize.Width - 10, 54);
-            contentBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            contentBox.MouseDown += ActivateForInteraction;
-            body.Controls.Add(contentBox);
+            // A área de conteúdo é a mesma do popup de texto: a miniatura ocupa
+            // o lugar da caixa de mensagem e o restante do layout (botões,
+            // resposta) fica idêntico ao popup original.
+            if (hasAudio)
+            {
+                // A timeline fica sobre o fundo natural da janela (sem quadro
+                // branco) e a transcrição usa a MESMA caixa de texto da
+                // mensagem de texto, logo abaixo.
+                audioPanel = new AudioTrackPanel(CreateAudioPayload(audio), false);
+                audioPanel.Location = new Point(5, 63);
+                audioPanel.Size = new Size(body.ClientSize.Width - 10, 40);
+                audioPanel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+                audioPanel.UsePopupColors(30);
+                audioPanel.PlaybackFailed += delegate(object source, EventArgs args)
+                {
+                    PlaybackFailedEventArgs failure = args as PlaybackFailedEventArgs;
+                    MessageBox.Show(
+                        this,
+                        failure == null
+                            ? "Não foi possível tocar o áudio."
+                            : failure.ErrorMessage,
+                        "TailMsg",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                };
+                body.Controls.Add(audioPanel);
 
-            Label replyLabel = new Label();
+                retryTranscriptionButton = new Button();
+                retryTranscriptionButton.Text = "Tentar de novo";
+                retryTranscriptionButton.Size = new Size(104, 20);
+                retryTranscriptionButton.Location = new Point(
+                    body.ClientSize.Width - 109,
+                    70);
+                retryTranscriptionButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+                retryTranscriptionButton.BackColor = Color.FromArgb(55, 65, 81);
+                retryTranscriptionButton.ForeColor = Color.White;
+                retryTranscriptionButton.FlatStyle = FlatStyle.Flat;
+                retryTranscriptionButton.FlatAppearance.BorderSize = 0;
+                retryTranscriptionButton.Cursor = Cursors.Hand;
+                retryTranscriptionButton.Visible = false;
+                retryTranscriptionButton.Click += delegate { StartTranscription(); };
+                body.Controls.Add(retryTranscriptionButton);
+
+                contentBox = new TextBox();
+                contentBox.Multiline = true;
+                contentBox.ReadOnly = true;
+                contentBox.ScrollBars = ScrollBars.Vertical;
+                contentBox.Font = new Font("Segoe UI", 10F);
+                contentBox.BackColor = Color.White;
+                contentBox.Location = new Point(5, 107);
+                contentBox.Size = new Size(body.ClientSize.Width - 10, 84);
+                contentBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+                contentBox.MouseDown += ActivateForInteraction;
+                body.Controls.Add(contentBox);
+            }
+            else if (isImage)
+            {
+                Panel imageBorder = new Panel();
+                imageBorder.Location = new Point(5, 65);
+                imageBorder.Size = new Size(body.ClientSize.Width - 10, 54);
+                imageBorder.Padding = new Padding(1);
+                imageBorder.BackColor = Color.FromArgb(107, 114, 128);
+                imageBorder.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+                body.Controls.Add(imageBorder);
+
+                PictureBox pictureBox = new PictureBox();
+                pictureBox.Dock = DockStyle.Fill;
+                pictureBox.SizeMode = PictureBoxSizeMode.Zoom;
+                pictureBox.BackColor = Color.White;
+                pictureBox.Image = imageThumbnail;
+                pictureBox.MouseDown += ActivateForInteraction;
+                imageBorder.Controls.Add(pictureBox);
+
+                if (!String.IsNullOrEmpty(imageThumbnailError))
+                {
+                    Label imageFailure = new Label();
+                    imageFailure.AutoSize = false;
+                    imageFailure.Dock = DockStyle.Bottom;
+                    imageFailure.Height = 16;
+                    imageFailure.Text = "Não foi possível exibir a imagem recebida.";
+                    imageFailure.TextAlign = ContentAlignment.MiddleLeft;
+                    imageFailure.ForeColor = Color.FromArgb(185, 28, 28);
+                    imageFailure.BackColor = Color.White;
+                    imageBorder.Controls.Add(imageFailure);
+                    imageFailure.BringToFront();
+                }
+            }
+            else
+            {
+                contentBox = new TextBox();
+                contentBox.Multiline = true;
+                contentBox.ReadOnly = true;
+                contentBox.ScrollBars = ScrollBars.Vertical;
+                contentBox.Font = new Font("Segoe UI", 10F);
+                contentBox.BackColor = Color.White;
+                contentBox.Text = message.Message;
+                contentBox.Location = new Point(5, 65);
+                contentBox.Size = new Size(body.ClientSize.Width - 10, 54);
+                contentBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+                contentBox.MouseDown += ActivateForInteraction;
+                body.Controls.Add(contentBox);
+            }
+
+            replyLabel = new Label();
             replyLabel.AutoSize = true;
             replyLabel.Text = "Responder:";
             replyLabel.ForeColor = Color.FromArgb(209, 213, 219);
-            replyLabel.Location = new Point(5, 145);
+            replyLabel.Location = new Point(5, hasAudio ? 197 : 145);
             body.Controls.Add(replyLabel);
 
-            replyBox = new TextBox();
+            replyBox = new MessageTextBox();
             replyBox.Multiline = true;
             replyBox.ScrollBars = ScrollBars.Vertical;
             replyBox.Font = new Font("Segoe UI", 10F);
             replyBox.BackColor = Color.White;
-            replyBox.Location = new Point(5, 165);
+            replyBox.Location = new Point(5, hasAudio ? 217 : 165);
             replyBox.Size = new Size(body.ClientSize.Width - 10, 54);
             replyBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             replyBox.MouseDown += ActivateForInteraction;
+            replyBox.UserEdited += delegate { replyBoxIsTranscription = false; };
+            replyBox.ImagePasted += ReplyImagePasted;
+            replyBox.ImagePasteFailed += ReplyImagePasteFailed;
             body.Controls.Add(replyBox);
+
+            // Faixa do anexo da resposta: fica escondida e o popup cresce
+            // quando o usuário cola uma imagem para responder.
+            replyAttachmentBorder = new Panel();
+            replyAttachmentBorder.Size = new Size(
+                body.ClientSize.Width - 10,
+                AttachmentBandHeight - 6);
+            replyAttachmentBorder.Padding = new Padding(1);
+            replyAttachmentBorder.BackColor = Color.FromArgb(107, 114, 128);
+            replyAttachmentBorder.Anchor =
+                AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            replyAttachmentBorder.Visible = false;
+            body.Controls.Add(replyAttachmentBorder);
+
+            Panel replyAttachmentInner = new Panel();
+            replyAttachmentInner.Dock = DockStyle.Fill;
+            replyAttachmentInner.BackColor = Color.White;
+            replyAttachmentBorder.Controls.Add(replyAttachmentInner);
+
+            replyAttachmentBox = new PictureBox();
+            replyAttachmentBox.Size = new Size(48, 48);
+            replyAttachmentBox.Location = new Point(3, 2);
+            replyAttachmentBox.SizeMode = PictureBoxSizeMode.Zoom;
+            replyAttachmentBox.BackColor = Color.FromArgb(243, 244, 246);
+            replyAttachmentInner.Controls.Add(replyAttachmentBox);
+
+            replyAttachmentLabel = new Label();
+            replyAttachmentLabel.AutoSize = false;
+            replyAttachmentLabel.Location = new Point(58, 2);
+            replyAttachmentLabel.Size = new Size(replyAttachmentInner.Width - 150, 48);
+            replyAttachmentLabel.Anchor =
+                AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            replyAttachmentLabel.TextAlign = ContentAlignment.MiddleLeft;
+            replyAttachmentLabel.ForeColor = Color.FromArgb(55, 65, 81);
+            replyAttachmentInner.Controls.Add(replyAttachmentLabel);
+
+            Button removeAttachmentButton = new Button();
+            removeAttachmentButton.Text = "Remover";
+            removeAttachmentButton.Size = new Size(78, 24);
+            removeAttachmentButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            removeAttachmentButton.BackColor = Color.FromArgb(55, 65, 81);
+            removeAttachmentButton.ForeColor = Color.White;
+            removeAttachmentButton.FlatStyle = FlatStyle.Flat;
+            removeAttachmentButton.FlatAppearance.BorderSize = 0;
+            removeAttachmentButton.Cursor = Cursors.Hand;
+            removeAttachmentButton.Click += delegate { ClearReplyAttachment(); };
+            replyAttachmentInner.Controls.Add(removeAttachmentButton);
+            replyAttachmentInner.Resize += delegate
+            {
+                removeAttachmentButton.Location = new Point(
+                    Math.Max(60, replyAttachmentInner.ClientSize.Width -
+                        removeAttachmentButton.Width - 6),
+                    Math.Max(1, (replyAttachmentInner.ClientSize.Height -
+                        removeAttachmentButton.Height) / 2));
+                replyAttachmentLabel.Size = new Size(
+                    Math.Max(40, removeAttachmentButton.Left -
+                        replyAttachmentLabel.Left - 6),
+                    Math.Max(20, replyAttachmentInner.ClientSize.Height - 4));
+            };
 
             replyButton = new Button();
             replyButton.Text = "Enviar";
             replyButton.Size = new Size(64, 22);
-            replyButton.Location = new Point(body.ClientSize.Width - 69, 221);
+            replyButton.Location = new Point(body.ClientSize.Width - 69, hasAudio ? 279 : 221);
             replyButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             replyButton.BackColor = Color.FromArgb(37, 99, 235);
             replyButton.ForeColor = Color.White;
@@ -2352,7 +4298,7 @@ namespace TailMsg
             transparencyButton = new Button();
             transparencyButton.Text = NotificationSettings.TransparencyPercent + "%";
             transparencyButton.Size = new Size(40, 22);
-            transparencyButton.Location = new Point(5, 221);
+            transparencyButton.Location = new Point(5, hasAudio ? 279 : 221);
             transparencyButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             transparencyButton.BackColor = Color.FromArgb(55, 65, 81);
             transparencyButton.ForeColor = Color.White;
@@ -2376,8 +4322,716 @@ namespace TailMsg
             copyButton.FlatAppearance.BorderSize = 0;
             copyButton.Cursor = Cursors.Hand;
             copyButton.Click += CopyButtonClick;
+            copyButton.Visible = !hasAudio;
             body.Controls.Add(copyButton);
 
+            // Microfone branco, pausa e microfone vermelho na resposta, na
+            // mesma linha do Enviar e com a mesma altura dele (22 px).
+            int replyRowTop = hasAudio ? 279 : 221;
+            replyToolsTop = replyRowTop;
+            replyMicButton = new IconButton();
+            replyMicButton.Size = new Size(22, 22);
+            replyMicButton.Location = new Point(420 - 147, replyRowTop);
+            replyMicButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            replyMicButton.AccessibleName = "Gravar áudio na resposta";
+            replyMicButton.Click += delegate { ToggleReplyWhiteMicrophone(); };
+            body.Controls.Add(replyMicButton);
+
+            replyPauseButton = new IconButton();
+            replyPauseButton.Size = new Size(22, 22);
+            replyPauseButton.Location = new Point(420 - 121, replyRowTop);
+            replyPauseButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            replyPauseButton.AccessibleName = "";
+            replyPauseButton.Glyph = IconGlyph.None;
+            replyPauseButton.Click += delegate { ToggleReplyPause(); };
+            body.Controls.Add(replyPauseButton);
+
+            replyLiveMicButton = new IconButton();
+            replyLiveMicButton.Size = new Size(22, 22);
+            replyLiveMicButton.Location = new Point(420 - 95, replyRowTop);
+            replyLiveMicButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            replyLiveMicButton.AccessibleName = "Gravar na resposta com transcrição ao vivo";
+            replyLiveMicButton.Click += delegate { ToggleReplyLiveMicrophone(); };
+            body.Controls.Add(replyLiveMicButton);
+
+            replyAudioBox = new TextBox();
+            replyAudioBox.Multiline = true;
+            replyAudioBox.ReadOnly = true;
+            replyAudioBox.ScrollBars = ScrollBars.Vertical;
+            replyAudioBox.Font = new Font("Segoe UI", 9F);
+            replyAudioBox.BackColor = Color.White;
+            replyAudioBox.Visible = false;
+            replyAudioBox.MouseDown += ActivateForInteraction;
+            replyAudioBorder = new Panel();
+            replyAudioBorder.BackColor = Color.FromArgb(107, 114, 128);
+            replyAudioBorder.Padding = new Padding(1);
+            replyAudioBorder.Visible = false;
+            replyAudioBorder.Controls.Add(replyAudioBox);
+            replyAudioBox.Dock = DockStyle.Fill;
+            body.Controls.Add(replyAudioBorder);
+
+            replyAudioRemoveButton = new Button();
+            replyAudioRemoveButton.Text = "Remover";
+            replyAudioRemoveButton.Size = new Size(78, 22);
+            replyAudioRemoveButton.BackColor = Color.FromArgb(55, 65, 81);
+            replyAudioRemoveButton.ForeColor = Color.White;
+            replyAudioRemoveButton.FlatStyle = FlatStyle.Flat;
+            replyAudioRemoveButton.FlatAppearance.BorderSize = 0;
+            replyAudioRemoveButton.Cursor = Cursors.Hand;
+            replyAudioRemoveButton.Visible = false;
+            replyAudioRemoveButton.Click += delegate { ClearReplyAudio(); };
+            body.Controls.Add(replyAudioRemoveButton);
+
+            UpdateReplyRecordButtons();
+
+            if (hasAudio) StartTranscription();
+
+            baseReplyButtonTop = replyButton.Top;
+            baseTransparencyButtonTop = transparencyButton.Top;
+            basePopupHeight = ClientSize.Height;
+            RefreshReplyCapability();
+            ApplyReplyLayout();
+        }
+
+        // Atualiza se o remetente aceita imagens: quem nos enviou uma imagem
+        // certamente aceita; nos outros casos vale a descoberta do peer.
+        private void RefreshReplyCapability()
+        {
+            if (imageMessage != null)
+            {
+                replySupportsImages = true;
+            }
+            else
+            {
+                int capabilities = 0;
+                if (PeerCapabilityLookup != null)
+                {
+                    capabilities = PeerCapabilityLookup(remoteAddress);
+                }
+                replySupportsImages = TailMsgProtocol.SupportsImages(capabilities);
+            }
+            UpdateReplyLabel();
+        }
+
+        private void UpdateReplyLabel()
+        {
+            if (replyLabel == null) return;
+            replyLabel.Text = replySupportsImages
+                ? "Responder:  (Ctrl+V anexa uma imagem)"
+                : "Responder:";
+        }
+
+        private void ReplyImagePasted(object sender, ImagePastedEventArgs e)
+        {
+            if (e == null || e.Image == null) return;
+            SetReplyAttachment(e.Image);
+        }
+
+        private void ReplyImagePasteFailed(object sender, ImagePasteFailedEventArgs e)
+        {
+            if (e == null || String.IsNullOrEmpty(e.ErrorMessage)) return;
+            MessageBox.Show(
+                this,
+                e.ErrorMessage,
+                "TailMsg",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+
+        private void SetReplyAttachment(ImagePayload image)
+        {
+            RefreshReplyCapability();
+            ClearReplyAttachmentThumbnail();
+            pendingReplyImage = image;
+
+            string error;
+            replyAttachmentThumbnail = ImageTransfer.CreateThumbnail(
+                image.PngBytes,
+                48,
+                48,
+                out error);
+            replyAttachmentBox.Image = replyAttachmentThumbnail;
+
+            string description = "Anexo: " +
+                ImageTransfer.DescribeDimensions(image.Width, image.Height) +
+                " — " + ImageTransfer.DescribeBytes(image.ByteCount);
+            if (ImageTransfer.IsLarge(image.ByteCount))
+            {
+                description += "  (arquivo grande: o envio pode demorar)";
+            }
+            if (!String.IsNullOrEmpty(error))
+            {
+                description += "  (miniatura indisponível)";
+            }
+            replyAttachmentLabel.Text = description;
+
+            ApplyReplyLayout();
+        }
+
+        private void ClearReplyAttachment()
+        {
+            pendingReplyImage = null;
+            ClearReplyAttachmentThumbnail();
+            ApplyReplyLayout();
+        }
+
+        private void ClearReplyAttachmentThumbnail()
+        {
+            if (replyAttachmentThumbnail == null) return;
+            replyAttachmentBox.Image = null;
+            replyAttachmentThumbnail.Dispose();
+            replyAttachmentThumbnail = null;
+        }
+
+        private static AudioPayload CreateAudioPayload(AudioReceivedEventArgs audio)
+        {
+            AudioPayload payload = new AudioPayload();
+            payload.WavBytes = audio.AudioBytes;
+            payload.DurationMilliseconds = audio.DurationMilliseconds;
+            return payload;
+        }
+
+        // A transcrição é buscada em segundo plano: o popup abre na hora e o
+        // texto aparece quando o serviço responde.
+        private void StartTranscription()
+        {
+            if (audioMessage == null || contentBox == null) return;
+            if (transcriptionInProgress) return;
+
+            string cached;
+            if (TranscriptionCache.TryGet(audioMessage.OperationId, out cached))
+            {
+                ApplyTranscription(true, cached, "");
+                return;
+            }
+
+            transcriptionInProgress = true;
+            SetTranscriptionText("Transcrevendo...");
+            retryTranscriptionButton.Visible = false;
+
+            byte[] audioBytes = audioMessage.AudioBytes;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text;
+                string error;
+                bool ok = TranscriptionClient.TryTranscribe(
+                    audioBytes,
+                    "audio.wav",
+                    audioMessage.OperationId,
+                    out text,
+                    out error);
+
+                if (IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        transcriptionInProgress = false;
+                        ApplyTranscription(ok, text, error);
+                    });
+                }
+                catch (InvalidOperationException) { }
+            });
+        }
+
+        // A transcrição aparece na mesma caixa de texto usada pelas mensagens
+        // de texto recebidas.
+        private void SetTranscriptionText(string text)
+        {
+            if (contentBox == null || contentBox.IsDisposed) return;
+            contentBox.Text = text == null ? "" : text;
+            contentBox.SelectionStart = contentBox.TextLength;
+            contentBox.ScrollToCaret();
+        }
+
+        private void ApplyTranscription(bool ok, string text, string error)
+        {
+            if (contentBox == null || contentBox.IsDisposed) return;
+            if (ok)
+            {
+                SetTranscriptionText(text);
+                retryTranscriptionButton.Visible = false;
+                TranscriptionCache.Remember(audioMessage.OperationId, text);
+                return;
+            }
+
+            SetTranscriptionText(String.IsNullOrEmpty(error)
+                ? "Não foi possível transcrever este áudio."
+                : "Não foi possível transcrever: " + error);
+            retryTranscriptionButton.Visible = true;
+        }
+
+        // ---- Áudio na resposta -------------------------------------------------
+
+        // Três botões na mesma linha do Enviar: branco, pausa e vermelho, com
+        // os mesmos ícones do painel principal.
+        private void UpdateReplyRecordButtons()
+        {
+            if (replyMicButton == null) return;
+            EnsureAudioIconsStatic();
+
+            bool whiteActive = replyRecording && !replyRecordingLive;
+            bool redActive = replyRecording && replyRecordingLive;
+
+            if (whiteActive)
+            {
+                replyMicButton.SourceImage = null;
+                replyMicButton.CircleColor = Color.FromArgb(61, 21, 21);
+                replyMicButton.CircleOutline = Color.FromArgb(90, 36, 36);
+                replyMicButton.Glyph = IconGlyph.Check;
+                replyMicButton.AccessibleName = "Encerrar gravação na resposta";
+            }
+            else
+            {
+                replyMicButton.SourceImage = MainForm.WhiteMicrophoneIcon;
+                replyMicButton.Glyph = IconGlyph.None;
+                replyMicButton.AccessibleName = "Gravar áudio na resposta";
+            }
+
+            if (redActive)
+            {
+                replyLiveMicButton.SourceImage = null;
+                replyLiveMicButton.CircleColor = Color.FromArgb(19, 32, 30);
+                replyLiveMicButton.CircleOutline = Color.FromArgb(44, 64, 61);
+                replyLiveMicButton.Glyph = IconGlyph.Check;
+                replyLiveMicButton.AccessibleName = "Encerrar transcrição na resposta";
+            }
+            else
+            {
+                replyLiveMicButton.SourceImage = MainForm.RedMicrophoneIcon;
+                replyLiveMicButton.Glyph = IconGlyph.None;
+                replyLiveMicButton.AccessibleName =
+                    "Gravar na resposta com transcrição ao vivo";
+            }
+
+            if (replyRecording && !replyPaused)
+            {
+                replyPauseButton.SourceImage = MainForm.PauseIcon;
+                replyPauseButton.Glyph = IconGlyph.None;
+                replyPauseButton.AccessibleName = "Pausar gravação da resposta";
+            }
+            else if (replyRecording && replyPaused)
+            {
+                replyPauseButton.SourceImage = null;
+                replyPauseButton.CircleColor = Color.FromArgb(242, 207, 55);
+                replyPauseButton.CircleOutline = Color.FromArgb(196, 157, 0);
+                replyPauseButton.Glyph = IconGlyph.Play;
+                replyPauseButton.AccessibleName = "Retomar gravação da resposta";
+            }
+            else
+            {
+                replyPauseButton.SourceImage = null;
+                replyPauseButton.Glyph = IconGlyph.None;
+                replyPauseButton.AccessibleName = "";
+            }
+
+            replyMicButton.Invalidate();
+            replyPauseButton.Invalidate();
+            replyLiveMicButton.Invalidate();
+        }
+
+        private static void EnsureAudioIconsStatic()
+        {
+            MainForm.EnsureAudioIconsPublic();
+        }
+
+        private void ToggleReplyWhiteMicrophone()
+        {
+            if (replyRecording && !replyRecordingLive)
+            {
+                StopReplyRecording();
+                return;
+            }
+            if (replyRecording) return;
+            StartReplyRecording(false);
+        }
+
+        private void ToggleReplyLiveMicrophone()
+        {
+            if (replyRecording && replyRecordingLive)
+            {
+                StopReplyRecording();
+                return;
+            }
+            if (replyRecording) return;
+            StartReplyRecording(true);
+        }
+
+        private void ToggleReplyPause()
+        {
+            if (!replyRecording || replyRecorder == null) return;
+            string error;
+            if (replyPaused)
+            {
+                if (!replyRecorder.Resume(out error)) return;
+                replyPaused = false;
+            }
+            else
+            {
+                if (!replyRecorder.Pause(out error)) return;
+                replyPaused = true;
+            }
+            UpdateReplyRecordButtons();
+        }
+
+        private void StartReplyRecording(bool live)
+        {
+            if (replyRecording) return;
+            WaveRecorder candidate = new WaveRecorder();
+            string error;
+            if (!candidate.Start(out error))
+            {
+                candidate.Dispose();
+                MessageBox.Show(this, error, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            replyRecorder = candidate;
+            replyRecording = true;
+            replyRecordingLive = live;
+            replyPaused = false;
+            replyDiagnosticTicks = 0;
+            replyCommittedText = "";
+            replyDraftText = "";
+            replyCommitOffset = 0;
+            replyLastDraftBytes = 0;
+            replyGeneration++;
+            replyCommitBusy = false;
+            UpdateReplyRecordButtons();
+            ShowReplyAudioPanel(live
+                ? "Gravando (transcrição ao vivo)..."
+                : "Gravando...");
+
+            if (replyRecordingTimer == null)
+            {
+                replyRecordingTimer = new System.Windows.Forms.Timer();
+                replyRecordingTimer.Interval = 250;
+                replyRecordingTimer.Tick += delegate { UpdateReplyRecording(); };
+            }
+            replyRecordingTimer.Start();
+        }
+
+        private void UpdateReplyRecording()
+        {
+            if (!replyRecording || replyRecorder == null) return;
+
+            int seconds = (int)Math.Round(replyRecorder.ElapsedSeconds);
+            string partial = replyRecordingLive ? ReplyTranscriptionText() : "";
+            ShowReplyAudioPanel("Gravando " + (seconds / 60) + ":" +
+                (seconds % 60).ToString("00") +
+                (replyPaused ? " (pausado)" : "") +
+                (partial.Length > 0 ? "  " + partial : ""));
+
+            if (replyRecorder.LimitReached)
+            {
+                StopReplyRecording();
+                return;
+            }
+
+            if (replyRecordingLive) UpdateReplyLiveTranscription();
+        }
+
+        private void StopReplyRecording()
+        {
+            if (!replyRecording || replyRecorder == null) return;
+            bool wasLive = replyRecordingLive;
+
+            byte[] liveTail = null;
+            if (wasLive) liveTail = replyRecorder.SnapshotFrom(replyCommitOffset);
+
+            if (replyRecordingTimer != null) replyRecordingTimer.Stop();
+            replyRecording = false;
+            replyRecordingLive = false;
+            replyPaused = false;
+            AudioPayload payload = replyRecorder.Stop();
+            replyRecorder.Dispose();
+            replyRecorder = null;
+            UpdateReplyRecordButtons();
+
+            if (payload == null)
+            {
+                HideReplyAudioPanel();
+                return;
+            }
+
+            SetReplyAudio(payload);
+            if (wasLive)
+            {
+                if (liveTail != null && liveTail.Length >= 12800)
+                {
+                    TranscribeReplyWindow(liveTail, true);
+                }
+                replyCommitOffset = 0;
+                replyLastDraftBytes = 0;
+            }
+            else
+            {
+                StartReplyTranscription(payload);
+            }
+        }
+
+        private string ReplyTranscriptionText()
+        {
+            string committed = replyCommittedText.Trim();
+            string draft = replyDraftText.Trim();
+            if (draft.Length == 0) return committed;
+            if (committed.Length == 0) return draft;
+            return committed + " " + draft;
+        }
+
+        private void StartReplyTranscription(AudioPayload payload)
+        {
+            if (payload == null || payload.WavBytes == null) return;
+            byte[] wavBytes = payload.WavBytes;
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            ShowReplyAudioPanel("Áudio " + (payload.DurationMilliseconds / 1000) +
+                "s — transcrevendo...");
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text;
+                string error;
+                bool ok = TranscriptionClient.TryTranscribe(
+                    wavBytes,
+                    "audio.wav",
+                    operationId,
+                    out text,
+                    out error);
+                if (IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (ok)
+                        {
+                            TranscriptionCache.Remember(operationId, text);
+                            SetReplyTranscriptionText(text);
+                        }
+                        ShowReplyAudioPanel(ok
+                            ? "Áudio " + (payload.DurationMilliseconds / 1000) +
+                                "s — " + text
+                            : "Áudio " + (payload.DurationMilliseconds / 1000) +
+                                "s — não foi possível transcrever: " + error);
+                    });
+                }
+                catch (InvalidOperationException) { }
+            });
+        }
+
+        // Transcrição incremental do microfone vermelho na resposta, no mesmo
+        // ritmo do painel principal: rascunho a cada 1 s, confirmação a cada 10 s.
+        private void UpdateReplyLiveTranscription()
+        {
+            if (replyRecorder == null || replyCommitBusy) return;
+            int captured = replyRecorder.CapturedBytes;
+            int windowBytes = captured - replyCommitOffset;
+            if (windowBytes < 4800) return;
+
+            if (windowBytes >= 16000 * 2 * 10 && !replyCommitBusy)
+            {
+                replyCommitBusy = true;
+                replyLastDraftBytes = captured;
+                TranscribeReplyWindow(windowBytes, true);
+                return;
+            }
+
+            if (captured - replyLastDraftBytes >= 16000 * 2)
+            {
+                replyLastDraftBytes = captured;
+                TranscribeReplyWindow(windowBytes, false);
+            }
+        }
+
+        private void TranscribeReplyWindow(int windowBytes, bool commit)
+        {
+            byte[] pcm;
+            if (replyRecorder != null)
+            {
+                pcm = replyRecorder.SnapshotFrom(replyCommitOffset);
+            }
+            else
+            {
+                return;
+            }
+            TranscribeReplyBytes(pcm, commit, replyCommitOffset + windowBytes);
+        }
+
+        private void TranscribeReplyWindow(byte[] pcm, bool commit)
+        {
+            TranscribeReplyBytes(pcm, commit, 0);
+        }
+
+        private void TranscribeReplyBytes(byte[] pcm, bool commit, int commitEnd)
+        {
+            if (pcm == null || pcm.Length < 4800) return;
+            byte[] wav = WaveRecorder.WrapPcm(pcm);
+            if (wav == null) return;
+
+            int generation = ++replyGeneration;
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string text;
+                string error;
+                bool ok = TranscriptionClient.TryTranscribe(
+                    wav,
+                    "audio.wav",
+                    operationId,
+                    out text,
+                    out error);
+                if (IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (commit)
+                        {
+                            replyCommitBusy = false;
+                            if (!ok) return;
+                            replyCommittedText = AppendReplyText(replyCommittedText, text);
+                            replyDraftText = "";
+                            replyCommitOffset = commitEnd;
+                            replyLastDraftBytes = commitEnd;
+                            TranscriptionCache.Remember(operationId, text);
+                        }
+                        else
+                        {
+                            if (generation != replyGeneration) return;
+                            if (!ok) return;
+                            replyDraftText = text;
+                        }
+                        SetReplyTranscriptionText(ReplyTranscriptionText());
+                        if (replyRecording)
+                        {
+                            ShowReplyAudioPanel("Gravando — " + ReplyTranscriptionText());
+                        }
+                        else if (replyAudio != null)
+                        {
+                            ShowReplyAudioPanel("Áudio " +
+                                (replyAudio.DurationMilliseconds / 1000) + "s — " +
+                                ReplyTranscriptionText());
+                        }
+                    });
+                }
+                catch (InvalidOperationException) { }
+            });
+        }
+
+        private static string AppendReplyText(string current, string addition)
+        {
+            string text = (current ?? "").Trim();
+            string extra = (addition ?? "").Trim();
+            if (extra.Length == 0) return text;
+            if (text.Length == 0) return extra;
+            return text + " " + extra;
+        }
+
+        private void SetReplyAudio(AudioPayload payload)
+        {
+            replyAudio = payload;
+            ApplyReplyLayout();
+            ShowReplyAudioPanel("Áudio " + (payload.DurationMilliseconds / 1000) +
+                "s anexado.");
+        }
+
+        private void ClearReplyAudio()
+        {
+            if (replyRecording) StopReplyRecording();
+            replyAudio = null;
+            replyCommittedText = "";
+            replyDraftText = "";
+            replyBoxIsTranscription = false;
+            replyBox.SetProgrammaticText("");
+            HideReplyAudioPanel();
+            ApplyReplyLayout();
+        }
+
+        private void SetReplyTranscriptionText(string transcription)
+        {
+            if (replyBox == null) return;
+            string text = transcription == null ? "" : transcription.Trim();
+            replyBoxIsTranscription = text.Length > 0;
+            replyBox.SetProgrammaticText(text);
+        }
+
+        private void ShowReplyAudioPanel(string text)
+        {
+            if (replyAudioBox == null) return;
+            replyAudioBox.Text = text == null ? "" : text;
+            replyAudioBorder.Visible = true;
+            replyAudioRemoveButton.Visible = true;
+            ApplyReplyLayout();
+        }
+
+        private void HideReplyAudioPanel()
+        {
+            if (replyAudioBorder == null) return;
+            replyAudioBorder.Visible = false;
+            replyAudioRemoveButton.Visible = false;
+            if (replyAudioBox != null) replyAudioBox.Text = "";
+            ApplyReplyLayout();
+        }
+
+        // A faixa de anexos cresce conforme o que estiver anexado (imagem e/ou
+        // áudio) e a linha de botões (Enviar, transparência e os três de áudio)
+        // desce para DEPOIS das faixas — antes ela caía na mesma área e o painel
+        // do anexo (adicionado depois, no topo do z-order) engolia os cliques.
+        private void ApplyReplyLayout()
+        {
+            if (replyBox == null) return;
+
+            int top = replyBox.Bottom + 6;
+            if (pendingReplyImage != null)
+            {
+                replyAttachmentBorder.Location = new Point(5, top);
+                replyAttachmentBorder.Visible = true;
+                top += AttachmentBandHeight;
+            }
+            else
+            {
+                replyAttachmentBorder.Visible = false;
+            }
+
+            bool audioVisible = replyAudio != null || replyRecording;
+            if (audioVisible && replyAudioBorder != null)
+            {
+                replyAudioBorder.Location = new Point(5, top);
+                replyAudioBorder.Size = new Size(
+                    Math.Max(120, replyBox.Width),
+                    AttachmentBandHeight - 6);
+                replyAudioBorder.Visible = true;
+                replyAudioRemoveButton.Location = new Point(
+                    Math.Max(60, replyAudioBorder.Width - 84),
+                    Math.Max(2, (replyAudioBorder.Height - 22) / 2));
+                replyAudioRemoveButton.BringToFront();
+                top += AttachmentBandHeight;
+            }
+            else if (replyAudioBorder != null)
+            {
+                replyAudioBorder.Visible = false;
+            }
+
+            int toolsTop = top + 3;
+            replyButton.Top = toolsTop;
+            transparencyButton.Top = toolsTop;
+            replyMicButton.Top = toolsTop;
+            replyPauseButton.Top = toolsTop;
+            replyLiveMicButton.Top = toolsTop;
+
+            // Os três botões de áudio e o Enviar precisam ficar acima das
+            // faixas no z-order.
+            replyMicButton.BringToFront();
+            replyPauseButton.BringToFront();
+            replyLiveMicButton.BringToFront();
+            replyButton.BringToFront();
+            transparencyButton.BringToFront();
+
+            int required = toolsTop + replyButton.Height + 10;
+            int height = Math.Max(basePopupHeight, required);
+            if (height != ClientSize.Height)
+            {
+                ClientSize = new Size(ClientSize.Width, height);
+            }
         }
 
         internal void SetNotificationLocation(Point location)
@@ -2435,6 +5089,19 @@ namespace TailMsg
                 if (transparencyMenu != null) transparencyMenu.Dispose();
                 if (transparencyRegularFont != null) transparencyRegularFont.Dispose();
                 if (transparencySelectedFont != null) transparencySelectedFont.Dispose();
+                if (imageThumbnail != null) imageThumbnail.Dispose();
+                if (replyAttachmentThumbnail != null) replyAttachmentThumbnail.Dispose();
+                if (audioPanel != null) audioPanel.Dispose();
+                if (replyRecordingTimer != null)
+                {
+                    replyRecordingTimer.Stop();
+                    replyRecordingTimer.Dispose();
+                }
+                if (replyRecorder != null)
+                {
+                    replyRecorder.Dispose();
+                    replyRecorder = null;
+                }
             }
             base.Dispose(disposing);
         }
@@ -2477,10 +5144,36 @@ namespace TailMsg
 
         private void ReplyButtonClick(object sender, EventArgs e)
         {
-            string reply = replyBox.Text.Trim();
-            if (reply.Length == 0)
+            // Responder durante a gravação: encerra a captura e anexa o áudio.
+            if (replyRecording)
+            {
+                StopReplyRecording();
+            }
+
+            // A transcrição exibida é informativa: só o áudio é enviado.
+            string reply = replyBoxIsTranscription ? "" : replyBox.Text.Trim();
+            ImagePayload attachment = pendingReplyImage;
+            AudioPayload replyAudioPayload = replyAudio;
+
+            if (reply.Length == 0 && attachment == null && replyAudioPayload == null)
             {
                 replyBox.Focus();
+                return;
+            }
+
+            RefreshReplyCapability();
+            if (attachment != null && !replySupportsImages)
+            {
+                MessageBox.Show(
+                    this,
+                    "O computador " + senderName +
+                    " usa uma versão do TailMsg sem suporte a imagens." +
+                    (reply.Length > 0
+                        ? " Somente o texto pode ser enviado."
+                        : " A imagem não será enviada."),
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
                 return;
             }
 
@@ -2488,33 +5181,124 @@ namespace TailMsg
             ThreadPool.QueueUserWorkItem(delegate
             {
                 PeerInfo peer = new PeerInfo();
-                peer.Name = message.SenderName;
-                peer.Address = message.RemoteAddress;
+                peer.Name = senderName;
+                peer.Address = remoteAddress;
                 peer.Port = NetworkService.TcpPort;
-                MessageSendResult result = MessageSender.Send(peer, localComputerName, reply);
+                peer.Capabilities = replySupportsImages
+                    ? TailMsgProtocol.CapabilityImage
+                    : 0;
+
+                // Texto e imagem viajam separados, como no envio principal.
+                bool sentText = false;
+                bool sentImage = false;
+                string failure = "";
+
+                if (reply.Length > 0)
+                {
+                    MessageSendResult textResult = MessageSender.Send(
+                        peer,
+                        localComputerName,
+                        reply);
+                    sentText = textResult.Success;
+                    if (!textResult.Success) failure = textResult.ErrorMessage;
+                }
+
+                if (failure.Length == 0 && attachment != null)
+                {
+                    MessageSendResult imageResult = MessageSender.SendImage(
+                        peer,
+                        localComputerName,
+                        attachment);
+                    sentImage = imageResult.Success;
+                    if (!imageResult.Success) failure = imageResult.ErrorMessage;
+                }
+
+                bool sentAudio = false;
+                if (failure.Length == 0 && replyAudioPayload != null)
+                {
+                    MessageSendResult audioResult = MessageSender.SendAudio(
+                        peer,
+                        localComputerName,
+                        replyAudioPayload);
+                    sentAudio = audioResult.Success;
+                    if (!audioResult.Success) failure = audioResult.ErrorMessage;
+                }
+
                 if (IsDisposed || !IsHandleCreated) return;
                 try
                 {
                     BeginInvoke((MethodInvoker)delegate
                     {
                         replyButton.Enabled = true;
-                        if (result.Success)
+                        if (sentText) replyBox.Clear();
+                        if (sentImage) ClearReplyAttachment();
+                        if (sentAudio)
                         {
-                            replyBox.Clear();
-                            replyButton.Text = "Enviado";
+                            ClearReplyAudio();
+                            replyBoxIsTranscription = false;
+                            replyBox.SetProgrammaticText("");
                         }
-                        else
+
+                        if (failure.Length == 0)
                         {
-                            MessageBox.Show(this, result.ErrorMessage, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            // Resposta entregue: o popup fecha e o resultado
+                            // aparece na janela principal.
+                            ReportStatus(
+                                sentImage
+                                    ? (sentText
+                                        ? "Resposta e imagem enviadas a " + senderName + "."
+                                        : "Imagem enviada a " + senderName + ".")
+                                    : "Resposta enviada a " + senderName + ".",
+                                false);
+                            Close();
+                            return;
                         }
+
+                        ReportStatus(
+                            "Falha ao responder " + senderName + ".",
+                            true);
+                        MessageBox.Show(this, failure, "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     });
                 }
                 catch (InvalidOperationException) { }
             });
         }
 
+        private void ReportStatus(string text, bool isError)
+        {
+            Action<string, bool> reporter = StatusReporter;
+            if (reporter == null) return;
+            try
+            {
+                reporter(text, isError);
+            }
+            catch
+            {
+                // O retorno de status nunca pode impedir o envio.
+            }
+        }
+
         private void CopyButtonClick(object sender, EventArgs e)
         {
+            if (imageMessage != null)
+            {
+                // Copia a imagem original (não a miniatura exibida).
+                string copyError;
+                if (ImageTransfer.TryCopyToClipboard(imageMessage.ImageBytes, out copyError))
+                {
+                    copyButton.Text = "Copiado!";
+                    return;
+                }
+
+                MessageBox.Show(
+                    this,
+                    "Não foi possível copiar a imagem: " + copyError,
+                    "TailMsg",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
             try
             {
                 Clipboard.SetText(contentBox.Text);
@@ -2532,12 +5316,63 @@ namespace TailMsg
         }
     }
 
+    // Guarda a transcrição por operação: o popup e o histórico de mensagens
+    // recebidas mostram o mesmo texto sem transcrever duas vezes.
+    internal static class TranscriptionCache
+    {
+        private const int MaximumEntries = 64;
+        private static readonly object Sync = new object();
+        private static readonly Dictionary<string, string> Entries =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+
+        public static void Remember(string operationId, string text)
+        {
+            if (String.IsNullOrEmpty(operationId) ||
+                String.IsNullOrEmpty(text) ||
+                !TailMsgDiagnostics.IsSafeOperationId(operationId))
+            {
+                return;
+            }
+            lock (Sync)
+            {
+                Entries[operationId] = text;
+                if (Entries.Count <= MaximumEntries) return;
+                List<string> keys = new List<string>(Entries.Keys);
+                for (int index = 0; index < keys.Count - MaximumEntries; index++)
+                {
+                    Entries.Remove(keys[index]);
+                }
+            }
+        }
+
+        public static bool TryGet(string operationId, out string text)
+        {
+            text = "";
+            if (String.IsNullOrEmpty(operationId)) return false;
+            lock (Sync)
+            {
+                return Entries.TryGetValue(operationId, out text);
+            }
+        }
+    }
+
     internal sealed class PeerInfo
     {
         public string Name;
         public string Address;
         public int Port;
         public bool IsLocal;
+        public int Capabilities;
+
+        public bool SupportsImages
+        {
+            get { return TailMsgProtocol.SupportsImages(Capabilities); }
+        }
+
+        public bool SupportsAudio
+        {
+            get { return TailMsgProtocol.SupportsAudio(Capabilities); }
+        }
 
         public override string ToString()
         {
@@ -2552,6 +5387,29 @@ namespace TailMsg
         public string RemoteAddress;
         public string OperationId;
         public string Fingerprint;
+    }
+
+    internal sealed class ImageReceivedEventArgs : EventArgs
+    {
+        public string SenderName;
+        public string RemoteAddress;
+        public string OperationId;
+        public string Fingerprint;
+        public byte[] ImageBytes;
+        public int Width;
+        public int Height;
+        public string Sha256;
+    }
+
+    internal sealed class AudioReceivedEventArgs : EventArgs
+    {
+        public string SenderName;
+        public string RemoteAddress;
+        public string OperationId;
+        public string Fingerprint;
+        public byte[] AudioBytes;
+        public int DurationMilliseconds;
+        public string Sha256;
     }
 
     internal sealed class MessageSendResult
@@ -2597,6 +5455,28 @@ namespace TailMsg
         public const string DiscoveryResponse = "TAILMSG_HERE";
         public const string Message = "TAILMSG_MESSAGE";
         public const string Acknowledgement = "TAILMSG_ACK";
+        public const string Image = "TAILMSG_IMAGE";
+        public const string ImageChunk = "TAILMSG_CHUNK";
+        public const string ImageEnd = "TAILMSG_IMAGE_END";
+        public const string ImageFormatPng = "png";
+        public const string Audio = "TAILMSG_AUDIO";
+        public const string AudioEnd = "TAILMSG_AUDIO_END";
+        public const string AudioFormatWav = "wav";
+        public const int CapabilityImage = 1;
+        public const int CapabilityAudio = 2;
+        // Formato único de captura: 16 kHz, mono, 16 bits (PCM).
+        public const int AudioSampleRate = 16000;
+        public const int AudioChannels = 1;
+        public const int AudioBitsPerSample = 16;
+        public const int AudioChunkBytes = ImageChunkBytes;
+        public const int MaximumAudioLineBytes = MaximumImageLineBytes;
+        // Teto de segurança da gravação contínua (30 minutos ≈ 57 MB).
+        public const int MaximumAudioSeconds = 30 * 60;
+        public const int ImageChunkBytes = 48 * 1024;
+        public const int MaximumImageLineBytes = ImageChunkBytes + (ImageChunkBytes / 2) + 1024;
+        public const long LargeImageWarningBytes = 50L * 1024L * 1024L;
+        public const string AcknowledgementOk = Acknowledgement + "|1|OK";
+        public const string AcknowledgementRejected = Acknowledgement + "|1|REJECT";
 
         public static string Encode(string value)
         {
@@ -2613,9 +5493,78 @@ namespace TailMsg
             return DiscoveryRequest + "|1|" + Encode(name);
         }
 
+        // Sem o campo de capacidades: usado como fixture de peer antigo.
         public static string BuildDiscoveryResponse(string name, string address, int port)
         {
             return DiscoveryResponse + "|1|" + Encode(name) + "|" + address + "|" + port;
+        }
+
+        // O campo extra fica no fim de propósito: peers antigos ignoram.
+        public static string BuildDiscoveryResponse(
+            string name,
+            string address,
+            int port,
+            int capabilities)
+        {
+            return BuildDiscoveryResponse(name, address, port) + "|" +
+                capabilities.ToString(CultureInfo.InvariantCulture);
+        }
+
+        public static bool TryParseDiscoveryResponse(
+            string line,
+            out string name,
+            out string address,
+            out int port,
+            out int capabilities)
+        {
+            name = "";
+            address = "";
+            port = 0;
+            capabilities = 0;
+
+            if (String.IsNullOrEmpty(line)) return false;
+            string[] pieces = line.Split('|');
+            if (pieces.Length < 5) return false;
+            if (pieces[0] != DiscoveryResponse || pieces[1] != "1") return false;
+
+            int parsedPort;
+            if (!Int32.TryParse(pieces[4], out parsedPort)) return false;
+            if (parsedPort <= 0 || parsedPort > 65535) return false;
+
+            try
+            {
+                name = Decode(pieces[2]);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+
+            address = pieces[3];
+            port = parsedPort;
+
+            // Campo opcional: ausente ou inválido significa peer sem capacidade.
+            if (pieces.Length >= 6)
+            {
+                int parsedCapabilities;
+                if (Int32.TryParse(pieces[5], out parsedCapabilities) &&
+                    parsedCapabilities >= 0)
+                {
+                    capabilities = parsedCapabilities;
+                }
+            }
+
+            return true;
+        }
+
+        public static bool SupportsImages(int capabilities)
+        {
+            return (capabilities & CapabilityImage) == CapabilityImage;
+        }
+
+        public static bool SupportsAudio(int capabilities)
+        {
+            return (capabilities & CapabilityAudio) == CapabilityAudio;
         }
 
         public static string BuildMessage(string senderName, string message)
@@ -2635,6 +5584,421 @@ namespace TailMsg
             }
             return line;
         }
+
+        public static string ComputeSha256Hex(byte[] data)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] digest = sha.ComputeHash(data ?? new byte[0]);
+                StringBuilder result = new StringBuilder(digest.Length * 2);
+                foreach (byte item in digest)
+                {
+                    result.Append(item.ToString("x2", CultureInfo.InvariantCulture));
+                }
+                return result.ToString();
+            }
+        }
+
+        public static bool IsSafeSha256(string value)
+        {
+            if (String.IsNullOrEmpty(value) || value.Length != 64) return false;
+            foreach (char item in value)
+            {
+                bool hex = (item >= '0' && item <= '9') || (item >= 'a' && item <= 'f');
+                if (!hex) return false;
+            }
+            return true;
+        }
+
+        public static int CountImageChunks(long byteCount)
+        {
+            if (byteCount <= 0) return 0;
+            long chunks = (byteCount + ImageChunkBytes - 1) / ImageChunkBytes;
+            return chunks > Int32.MaxValue ? Int32.MaxValue : (int)chunks;
+        }
+
+        public static string BuildImageHeader(
+            string senderName,
+            string format,
+            int width,
+            int height,
+            long byteCount,
+            string sha256,
+            string operationId)
+        {
+            string line = Image + "|1|" + Encode(senderName) + "|" + format + "|" +
+                width.ToString(CultureInfo.InvariantCulture) + "|" +
+                height.ToString(CultureInfo.InvariantCulture) + "|" +
+                byteCount.ToString(CultureInfo.InvariantCulture) + "|" + sha256;
+            if (TailMsgDiagnostics.IsSafeOperationId(operationId))
+            {
+                line += "|" + operationId;
+            }
+            return line;
+        }
+
+        public static bool TryParseImageHeader(string line, out ImageHeader header)
+        {
+            header = null;
+            if (String.IsNullOrEmpty(line)) return false;
+            string[] pieces = line.Split('|');
+            if (pieces.Length < 8) return false;
+            if (pieces[0] != Image || pieces[1] != "1") return false;
+            if (pieces[3] != ImageFormatPng) return false;
+
+            int width;
+            int height;
+            long byteCount;
+            if (!Int32.TryParse(pieces[4], NumberStyles.None, CultureInfo.InvariantCulture, out width)) return false;
+            if (!Int32.TryParse(pieces[5], NumberStyles.None, CultureInfo.InvariantCulture, out height)) return false;
+            if (!Int64.TryParse(pieces[6], NumberStyles.None, CultureInfo.InvariantCulture, out byteCount)) return false;
+            if (width <= 0 || height <= 0 || width > 100000 || height > 100000) return false;
+            if (byteCount <= 0 || byteCount > Int32.MaxValue) return false;
+            if (!IsSafeSha256(pieces[7])) return false;
+
+            string senderName;
+            try
+            {
+                senderName = Decode(pieces[2]);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+
+            ImageHeader parsed = new ImageHeader();
+            parsed.SenderName = senderName;
+            parsed.Format = pieces[3];
+            parsed.Width = width;
+            parsed.Height = height;
+            parsed.ByteCount = byteCount;
+            parsed.Sha256 = pieces[7];
+            parsed.OperationId = null;
+            if (pieces.Length >= 9 && TailMsgDiagnostics.IsSafeOperationId(pieces[8]))
+            {
+                parsed.OperationId = pieces[8];
+            }
+
+            header = parsed;
+            return true;
+        }
+
+        public static string BuildImageChunk(int index, string base64)
+        {
+            return ImageChunk + "|1|" +
+                index.ToString(CultureInfo.InvariantCulture) + "|" + base64;
+        }
+
+        public static bool TryParseImageChunk(
+            string line,
+            out int index,
+            out string base64)
+        {
+            index = 0;
+            base64 = "";
+            if (String.IsNullOrEmpty(line)) return false;
+            string[] pieces = line.Split('|');
+            if (pieces.Length != 4) return false;
+            if (pieces[0] != ImageChunk || pieces[1] != "1") return false;
+            if (!Int32.TryParse(pieces[2], NumberStyles.None, CultureInfo.InvariantCulture, out index)) return false;
+            if (index < 0) return false;
+            if (pieces[3].Length == 0) return false;
+            base64 = pieces[3];
+            return true;
+        }
+
+        public static string BuildImageEnd(string sha256)
+        {
+            return ImageEnd + "|1|" + sha256;
+        }
+
+        public static bool TryParseImageEnd(string line, out string sha256)
+        {
+            sha256 = "";
+            if (String.IsNullOrEmpty(line)) return false;
+            string[] pieces = line.Split('|');
+            if (pieces.Length != 3) return false;
+            if (pieces[0] != ImageEnd || pieces[1] != "1") return false;
+            if (!IsSafeSha256(pieces[2])) return false;
+            sha256 = pieces[2];
+            return true;
+        }
+
+        public static bool TryParseAcknowledgement(string line, out bool accepted)
+        {
+            accepted = false;
+            if (line == AcknowledgementOk)
+            {
+                accepted = true;
+                return true;
+            }
+            if (line == AcknowledgementRejected)
+            {
+                accepted = false;
+                return true;
+            }
+            return false;
+        }
+
+        public static string BuildAudioHeader(
+            string senderName,
+            int durationMilliseconds,
+            int sampleRate,
+            int channels,
+            int bitsPerSample,
+            long byteCount,
+            string sha256,
+            string operationId)
+        {
+            string line = Audio + "|1|" + Encode(senderName) + "|" +
+                AudioFormatWav + "|" +
+                durationMilliseconds.ToString(CultureInfo.InvariantCulture) + "|" +
+                sampleRate.ToString(CultureInfo.InvariantCulture) + "|" +
+                channels.ToString(CultureInfo.InvariantCulture) + "|" +
+                bitsPerSample.ToString(CultureInfo.InvariantCulture) + "|" +
+                byteCount.ToString(CultureInfo.InvariantCulture) + "|" + sha256;
+            if (TailMsgDiagnostics.IsSafeOperationId(operationId))
+            {
+                line += "|" + operationId;
+            }
+            return line;
+        }
+
+        public static bool TryParseAudioHeader(string line, out AudioHeader header)
+        {
+            header = null;
+            if (String.IsNullOrEmpty(line)) return false;
+            string[] pieces = line.Split('|');
+            if (pieces.Length < 10) return false;
+            if (pieces[0] != Audio || pieces[1] != "1") return false;
+            if (pieces[3] != AudioFormatWav) return false;
+
+            int durationMilliseconds;
+            int sampleRate;
+            int channels;
+            int bitsPerSample;
+            long byteCount;
+            if (!Int32.TryParse(pieces[4], NumberStyles.None, CultureInfo.InvariantCulture, out durationMilliseconds)) return false;
+            if (!Int32.TryParse(pieces[5], NumberStyles.None, CultureInfo.InvariantCulture, out sampleRate)) return false;
+            if (!Int32.TryParse(pieces[6], NumberStyles.None, CultureInfo.InvariantCulture, out channels)) return false;
+            if (!Int32.TryParse(pieces[7], NumberStyles.None, CultureInfo.InvariantCulture, out bitsPerSample)) return false;
+            if (!Int64.TryParse(pieces[8], NumberStyles.None, CultureInfo.InvariantCulture, out byteCount)) return false;
+
+            if (durationMilliseconds <= 0 ||
+                durationMilliseconds > MaximumAudioSeconds * 1000 + 5000) return false;
+            // Formato único: qualquer combinação diferente é recusada.
+            if (sampleRate != AudioSampleRate) return false;
+            if (channels != AudioChannels) return false;
+            if (bitsPerSample != AudioBitsPerSample) return false;
+            if (byteCount <= 0 || byteCount > Int32.MaxValue) return false;
+            if (!IsSafeSha256(pieces[9])) return false;
+
+            string senderName;
+            try
+            {
+                senderName = Decode(pieces[2]);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+
+            AudioHeader parsed = new AudioHeader();
+            parsed.SenderName = senderName;
+            parsed.Format = pieces[3];
+            parsed.DurationMilliseconds = durationMilliseconds;
+            parsed.SampleRate = sampleRate;
+            parsed.Channels = channels;
+            parsed.BitsPerSample = bitsPerSample;
+            parsed.ByteCount = byteCount;
+            parsed.Sha256 = pieces[9];
+            parsed.OperationId = null;
+            if (pieces.Length >= 11 && TailMsgDiagnostics.IsSafeOperationId(pieces[10]))
+            {
+                parsed.OperationId = pieces[10];
+            }
+
+            header = parsed;
+            return true;
+        }
+
+        public static string BuildAudioEnd(string sha256)
+        {
+            return AudioEnd + "|1|" + sha256;
+        }
+
+        public static bool TryParseAudioEnd(string line, out string sha256)
+        {
+            sha256 = "";
+            if (String.IsNullOrEmpty(line)) return false;
+            string[] pieces = line.Split('|');
+            if (pieces.Length != 3) return false;
+            if (pieces[0] != AudioEnd || pieces[1] != "1") return false;
+            if (!IsSafeSha256(pieces[2])) return false;
+            sha256 = pieces[2];
+            return true;
+        }
+
+        // Empacota amostras PCM num contêiner WAV (usado pelos testes e por
+        // qualquer reempacotamento futuro).
+        public static byte[] BuildWavContainer(
+            byte[] samples,
+            int sampleRate,
+            short channels,
+            short bitsPerSample)
+        {
+            int dataLength = samples == null ? 0 : samples.Length;
+            int blockAlign = channels * (bitsPerSample / 8);
+            using (MemoryStream stream = new MemoryStream())
+            using (BinaryWriter writer = new BinaryWriter(stream))
+            {
+                writer.Write(new char[] { 'R', 'I', 'F', 'F' });
+                writer.Write(36 + dataLength);
+                writer.Write(new char[] { 'W', 'A', 'V', 'E' });
+                writer.Write(new char[] { 'f', 'm', 't', ' ' });
+                writer.Write(16);
+                writer.Write((short)1);
+                writer.Write(channels);
+                writer.Write(sampleRate);
+                writer.Write(sampleRate * blockAlign);
+                writer.Write((short)blockAlign);
+                writer.Write(bitsPerSample);
+                writer.Write(new char[] { 'd', 'a', 't', 'a' });
+                writer.Write(dataLength);
+                if (dataLength > 0) writer.Write(samples, 0, dataLength);
+                writer.Flush();
+                return stream.ToArray();
+            }
+        }
+
+        // Duração de um WAV PCM 16 kHz mono 16 bits, lida do próprio arquivo.
+        public static bool TryReadWavDurationMilliseconds(
+            byte[] wavBytes,
+            out int durationMilliseconds)
+        {
+            durationMilliseconds = 0;
+            int dataBytes;
+            int sampleRate;
+            short channels;
+            short bits;
+            if (!TryReadWavFormat(wavBytes, out dataBytes, out sampleRate, out channels, out bits))
+            {
+                return false;
+            }
+            if (sampleRate <= 0 || channels <= 0 || bits <= 0) return false;
+            long bytesPerSecond = (long)sampleRate * channels * (bits / 8);
+            if (bytesPerSecond <= 0) return false;
+            durationMilliseconds = (int)((dataBytes * 1000L) / bytesPerSecond);
+            return true;
+        }
+
+        // Lê o bloco fmt e o tamanho do bloco data de um WAV PCM.
+        public static bool TryReadWavFormat(
+            byte[] wavBytes,
+            out int dataBytes,
+            out int sampleRate,
+            out short channels,
+            out short bitsPerSample)
+        {
+            dataBytes = 0;
+            sampleRate = 0;
+            channels = 0;
+            bitsPerSample = 0;
+            if (wavBytes == null || wavBytes.Length < 44) return false;
+            if (!(wavBytes[0] == 'R' && wavBytes[1] == 'I' && wavBytes[2] == 'F' && wavBytes[3] == 'F'))
+                return false;
+            if (!(wavBytes[8] == 'W' && wavBytes[9] == 'A' && wavBytes[10] == 'V' && wavBytes[11] == 'E'))
+                return false;
+
+            bool foundFormat = false;
+            int offset = 12;
+            while (offset + 8 <= wavBytes.Length)
+            {
+                int size = (int)(wavBytes[offset + 4] |
+                    (wavBytes[offset + 5] << 8) |
+                    (wavBytes[offset + 6] << 16) |
+                    (wavBytes[offset + 7] << 24));
+                string chunkId = "" + (char)wavBytes[offset] + (char)wavBytes[offset + 1] +
+                    (char)wavBytes[offset + 2] + (char)wavBytes[offset + 3];
+
+                if (chunkId == "fmt ")
+                {
+                    if (size < 16 || offset + 8 + 16 > wavBytes.Length) return false;
+                    int format = wavBytes[offset + 8] | (wavBytes[offset + 9] << 8);
+                    if (format != 1) return false;   // somente PCM
+                    channels = (short)(wavBytes[offset + 10] | (wavBytes[offset + 11] << 8));
+                    sampleRate = wavBytes[offset + 12] |
+                        (wavBytes[offset + 13] << 8) |
+                        (wavBytes[offset + 14] << 16) |
+                        (wavBytes[offset + 15] << 24);
+                    bitsPerSample = (short)(wavBytes[offset + 22] | (wavBytes[offset + 23] << 8));
+                    foundFormat = true;
+                }
+                else if (chunkId == "data")
+                {
+                    dataBytes = size;
+                    if (offset + 8 + size > wavBytes.Length)
+                    {
+                        dataBytes = wavBytes.Length - (offset + 8);
+                    }
+                }
+
+                if (size < 0) return false;
+                // Blocos de tamanho ímpar são preenchidos com um byte.
+                offset += 8 + size + (size % 2);
+            }
+
+            return foundFormat && dataBytes > 0;
+        }
+    }
+
+    internal sealed class AudioHeader
+    {
+        public string SenderName;
+        public string Format;
+        public int DurationMilliseconds;
+        public int SampleRate;
+        public int Channels;
+        public int BitsPerSample;
+        public long ByteCount;
+        public string Sha256;
+        public string OperationId;
+    }
+
+    // Áudio pronto para transporte: WAV PCM 16 kHz mono 16 bits.
+    internal sealed class AudioPayload
+    {
+        public byte[] WavBytes;
+        public int DurationMilliseconds;
+
+        public long ByteCount
+        {
+            get { return WavBytes == null ? 0 : WavBytes.Length; }
+        }
+    }
+
+    internal sealed class ImageHeader
+    {
+        public string SenderName;
+        public string Format;
+        public int Width;
+        public int Height;
+        public long ByteCount;
+        public string Sha256;
+        public string OperationId;
+    }
+
+    // Imagem pronta para transporte: PNG (sem perda) e dimensões conhecidas.
+    internal sealed class ImagePayload
+    {
+        public byte[] PngBytes;
+        public int Width;
+        public int Height;
+
+        public long ByteCount
+        {
+            get { return PngBytes == null ? 0 : PngBytes.Length; }
+        }
     }
 
     internal sealed class NetworkService
@@ -2649,6 +6013,8 @@ namespace TailMsg
         private readonly int discoveryPort;
         private readonly bool allowLoopback;
         private readonly object peersLock = new object();
+        internal int Capabilities =
+            TailMsgProtocol.CapabilityImage | TailMsgProtocol.CapabilityAudio;
         private readonly Dictionary<string, PeerInfo> peers = new Dictionary<string, PeerInfo>(StringComparer.OrdinalIgnoreCase);
         private TcpListener tcpListener;
         private UdpClient udpClient;
@@ -2657,6 +6023,8 @@ namespace TailMsg
         private const int UpdateStartAttempts = 240;
 
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
+        public event EventHandler<ImageReceivedEventArgs> ImageReceived;
+        public event EventHandler<AudioReceivedEventArgs> AudioReceived;
 
         public NetworkService(string name)
             : this(name, TcpPort, DiscoveryPort, false)
@@ -2873,6 +6241,21 @@ namespace TailMsg
                     if (String.IsNullOrEmpty(line)) return;
 
                     string[] pieces = line.Split('|');
+                    if (pieces.Length >= 2 && pieces[1] == "1" &&
+                        (pieces[0] == TailMsgProtocol.Image ||
+                         pieces[0] == TailMsgProtocol.Audio))
+                    {
+                        if (pieces[0] == TailMsgProtocol.Image)
+                        {
+                            HandleImageTransfer(stream, writer, line, remoteAddress);
+                        }
+                        else
+                        {
+                            HandleAudioTransfer(stream, writer, line, remoteAddress);
+                        }
+                        return;
+                    }
+
                     if (pieces.Length >= 4 && pieces[0] == TailMsgProtocol.Message && pieces[1] == "1")
                     {
                         if (pieces.Length >= 5 &&
@@ -2941,6 +6324,386 @@ namespace TailMsg
             }
         }
 
+        // Núcleo compartilhado de recepção binária (imagem e áudio): lê os
+        // blocos em ordem, confere o encerramento e valida tamanho e hash do
+        // conjunto. A validação específica do conteúdo fica com o chamador.
+        private static void TryReceiveBinaryPayload(
+            NetworkStream stream,
+            long declaredBytes,
+            string declaredSha256,
+            int maximumLineBytes,
+            int chunkBytes,
+            out byte[] payload,
+            out string failure)
+        {
+            payload = null;
+            failure = "";
+            int expectedChunks = (int)((declaredBytes + chunkBytes - 1) / chunkBytes);
+
+            using (MemoryStream buffer = new MemoryStream())
+            {
+                for (int index = 0; index < expectedChunks && failure.Length == 0; index++)
+                {
+                    string chunkLine = ReadLineLimited(stream, maximumLineBytes);
+                    if (String.IsNullOrEmpty(chunkLine))
+                    {
+                        failure = "bloco ausente";
+                        break;
+                    }
+
+                    int chunkIndex;
+                    string base64;
+                    if (!TailMsgProtocol.TryParseImageChunk(chunkLine, out chunkIndex, out base64))
+                    {
+                        failure = "bloco invalido";
+                        break;
+                    }
+                    if (chunkIndex != index)
+                    {
+                        failure = "bloco fora de ordem";
+                        break;
+                    }
+
+                    try
+                    {
+                        byte[] block = Convert.FromBase64String(base64);
+                        if (block.Length == 0 || block.Length > chunkBytes)
+                        {
+                            failure = "bloco fora do limite";
+                        }
+                        else if (buffer.Length + block.Length > declaredBytes)
+                        {
+                            failure = "bloco excede o tamanho declarado";
+                        }
+                        else
+                        {
+                            buffer.Write(block, 0, block.Length);
+                        }
+                    }
+                    catch (FormatException)
+                    {
+                        failure = "bloco corrompido";
+                    }
+                }
+
+                if (failure.Length == 0)
+                {
+                    string endLine = ReadLineLimited(stream, maximumLineBytes);
+                    string endSha256;
+                    // O encerramento de imagem e o de áudio diferem apenas no
+                    // tipo; o hash do conjunto é a validação que importa.
+                    if (!TailMsgProtocol.TryParseImageEnd(endLine, out endSha256) &&
+                        !TailMsgProtocol.TryParseAudioEnd(endLine, out endSha256))
+                    {
+                        failure = "encerramento ausente";
+                    }
+                    else if (endSha256 != declaredSha256)
+                    {
+                        failure = "hash de encerramento divergente";
+                    }
+                    else if (buffer.Length != declaredBytes)
+                    {
+                        failure = "tamanho recebido divergente";
+                    }
+                    else
+                    {
+                        byte[] received = buffer.ToArray();
+                        if (TailMsgProtocol.ComputeSha256Hex(received) != declaredSha256)
+                        {
+                            failure = "hash divergente";
+                        }
+                        else
+                        {
+                            payload = received;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Recebe o áudio anunciado pelo cabeçalho já lido.
+        private void HandleAudioTransfer(
+            NetworkStream stream,
+            StreamWriter writer,
+            string headerLine,
+            string remoteAddress)
+        {
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            string fingerprint = "";
+            string senderName = "";
+
+            AudioHeader header;
+            if (!TailMsgProtocol.TryParseAudioHeader(headerLine, out header))
+            {
+                RejectImage(writer);
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "audio_received",
+                    "failed",
+                    "",
+                    remoteAddress,
+                    "",
+                    0,
+                    "cabecalho-invalido");
+                return;
+            }
+
+            senderName = header.SenderName;
+            if (TailMsgDiagnostics.IsSafeOperationId(header.OperationId))
+            {
+                operationId = header.OperationId;
+            }
+            fingerprint = TailMsgDiagnostics.ComputeFingerprint(
+                senderName,
+                "audio:" + header.Sha256);
+
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "audio_received",
+                "pending",
+                senderName,
+                remoteAddress,
+                fingerprint,
+                0,
+                "bytes=" + header.ByteCount + ";duracao_ms=" +
+                    header.DurationMilliseconds);
+
+            writer.WriteLine(TailMsgProtocol.AcknowledgementOk);
+            writer.Flush();
+
+            byte[] audioBytes;
+            string failure;
+            int expectedChunks = TailMsgProtocol.CountImageChunks(header.ByteCount);
+            TryReceiveBinaryPayload(
+                stream,
+                header.ByteCount,
+                header.Sha256,
+                TailMsgProtocol.MaximumAudioLineBytes,
+                TailMsgProtocol.AudioChunkBytes,
+                out audioBytes,
+                out failure);
+
+            if (failure.Length == 0)
+            {
+                int dataBytes;
+                int sampleRate;
+                short channels;
+                short bitsPerSample;
+                int durationMilliseconds;
+                if (!TailMsgProtocol.TryReadWavFormat(
+                        audioBytes,
+                        out dataBytes,
+                        out sampleRate,
+                        out channels,
+                        out bitsPerSample) ||
+                    sampleRate != TailMsgProtocol.AudioSampleRate ||
+                    channels != TailMsgProtocol.AudioChannels ||
+                    bitsPerSample != TailMsgProtocol.AudioBitsPerSample)
+                {
+                    failure = "wav fora do formato esperado";
+                    audioBytes = null;
+                }
+                else if (!TailMsgProtocol.TryReadWavDurationMilliseconds(
+                    audioBytes,
+                    out durationMilliseconds))
+                {
+                    failure = "wav sem duracao legivel";
+                    audioBytes = null;
+                }
+            }
+
+            if (failure.Length > 0)
+            {
+                RejectImage(writer);
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "audio_received",
+                    "failed",
+                    senderName,
+                    remoteAddress,
+                    fingerprint,
+                    0,
+                    failure);
+                return;
+            }
+
+            writer.WriteLine(TailMsgProtocol.AcknowledgementOk);
+            writer.Flush();
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "audio_received",
+                "success",
+                senderName,
+                remoteAddress,
+                fingerprint,
+                0,
+                "bytes=" + audioBytes.Length + ";blocos=" + expectedChunks);
+
+            AudioReceivedEventArgs eventArgs = new AudioReceivedEventArgs();
+            eventArgs.SenderName = senderName;
+            eventArgs.RemoteAddress = remoteAddress;
+            eventArgs.OperationId = operationId;
+            eventArgs.Fingerprint = fingerprint;
+            eventArgs.AudioBytes = audioBytes;
+            eventArgs.DurationMilliseconds = header.DurationMilliseconds;
+            eventArgs.Sha256 = header.Sha256;
+            EventHandler<AudioReceivedEventArgs> handler = AudioReceived;
+            if (handler != null) handler(this, eventArgs);
+
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "audio_ack_sent",
+                "success",
+                senderName,
+                remoteAddress,
+                fingerprint,
+                0,
+                "");
+        }
+
+        // Recebe a transferência de imagem anunciada pelo cabeçalho já lido.
+        // Confirma o cabeçalho antes dos blocos para o remetente poder falhar
+        // cedo; só confirma o fim depois de validar tamanho, hash e assinatura.
+        private void HandleImageTransfer(
+            NetworkStream stream,
+            StreamWriter writer,
+            string headerLine,
+            string remoteAddress)
+        {
+            string operationId = TailMsgDiagnostics.CreateOperationId();
+            string fingerprint = "";
+            string senderName = "";
+
+            ImageHeader header;
+            if (!TailMsgProtocol.TryParseImageHeader(headerLine, out header))
+            {
+                RejectImage(writer);
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "image_received",
+                    "failed",
+                    "",
+                    remoteAddress,
+                    "",
+                    0,
+                    "cabecalho-invalido");
+                return;
+            }
+
+            senderName = header.SenderName;
+            if (TailMsgDiagnostics.IsSafeOperationId(header.OperationId))
+            {
+                operationId = header.OperationId;
+            }
+            fingerprint = TailMsgDiagnostics.ComputeFingerprint(
+                senderName,
+                "image:" + header.Sha256);
+
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "image_received",
+                "pending",
+                senderName,
+                remoteAddress,
+                fingerprint,
+                0,
+                "bytes=" + header.ByteCount + ";dimensoes=" +
+                    header.Width + "x" + header.Height);
+
+            writer.WriteLine(TailMsgProtocol.AcknowledgementOk);
+            writer.Flush();
+
+            // A partir daqui o protocolo é o mesmo para imagem e áudio:
+            // blocos, encerramento com hash e confirmações.
+            byte[] imageBytes;
+            string failure;
+            int expectedChunks = TailMsgProtocol.CountImageChunks(header.ByteCount);
+            TryReceiveBinaryPayload(
+                stream,
+                header.ByteCount,
+                header.Sha256,
+                TailMsgProtocol.MaximumImageLineBytes,
+                TailMsgProtocol.ImageChunkBytes,
+                out imageBytes,
+                out failure);
+
+            if (failure.Length == 0 && !IsPngSignature(imageBytes))
+            {
+                failure = "assinatura png ausente";
+                imageBytes = null;
+            }
+
+            if (failure.Length > 0)
+            {
+                RejectImage(writer);
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "image_received",
+                    "failed",
+                    senderName,
+                    remoteAddress,
+                    fingerprint,
+                    0,
+                    failure);
+                return;
+            }
+
+            writer.WriteLine(TailMsgProtocol.AcknowledgementOk);
+            writer.Flush();
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "image_received",
+                "success",
+                senderName,
+                remoteAddress,
+                fingerprint,
+                0,
+                "bytes=" + imageBytes.Length + ";blocos=" + expectedChunks);
+
+            ImageReceivedEventArgs eventArgs = new ImageReceivedEventArgs();
+            eventArgs.SenderName = senderName;
+            eventArgs.RemoteAddress = remoteAddress;
+            eventArgs.OperationId = operationId;
+            eventArgs.Fingerprint = fingerprint;
+            eventArgs.ImageBytes = imageBytes;
+            eventArgs.Width = header.Width;
+            eventArgs.Height = header.Height;
+            eventArgs.Sha256 = header.Sha256;
+            EventHandler<ImageReceivedEventArgs> handler = ImageReceived;
+            if (handler != null) handler(this, eventArgs);
+
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "image_ack_sent",
+                "success",
+                senderName,
+                remoteAddress,
+                fingerprint,
+                0,
+                "");
+        }
+
+        private static void RejectImage(StreamWriter writer)
+        {
+            try
+            {
+                writer.WriteLine(TailMsgProtocol.AcknowledgementRejected);
+                writer.Flush();
+            }
+            catch
+            {
+                // A recusa é melhor esforço: o remetente também tem timeout.
+            }
+        }
+
+        internal static bool IsPngSignature(byte[] data)
+        {
+            if (data == null || data.Length < 8) return false;
+            return data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E &&
+                data[3] == 0x47 && data[4] == 0x0D && data[5] == 0x0A &&
+                data[6] == 0x1A && data[7] == 0x0A;
+        }
+
         internal static string ReadLineLimited(Stream stream, int maximumBytes)
         {
             using (MemoryStream buffer = new MemoryStream())
@@ -2985,13 +6748,21 @@ namespace TailMsg
                     {
                         SendDiscoveryResponse(remote);
                     }
-                    else if (pieces.Length >= 5 && pieces[0] == TailMsgProtocol.DiscoveryResponse && pieces[1] == "1")
+                    else if (pieces.Length >= 2 &&
+                        pieces[0] == TailMsgProtocol.DiscoveryResponse)
                     {
-                        string name = TailMsgProtocol.Decode(pieces[2]);
+                        string name;
+                        string address;
                         int port;
-                        if (Int32.TryParse(pieces[4], out port) && port > 0 && port < 65536)
+                        int capabilities;
+                        if (TailMsgProtocol.TryParseDiscoveryResponse(
+                            line,
+                            out name,
+                            out address,
+                            out port,
+                            out capabilities))
                         {
-                            AddPeer(name, remote.Address.ToString(), port, false);
+                            AddPeer(name, remote.Address.ToString(), port, false, capabilities);
                         }
                     }
                 }
@@ -3011,7 +6782,8 @@ namespace TailMsg
                 TailMsgProtocol.BuildDiscoveryResponse(
                     localName,
                     address,
-                    ListeningTcpPort));
+                    ListeningTcpPort,
+                    Capabilities));
             try { udpClient.Send(response, response.Length, remote); } catch { }
         }
 
@@ -3074,6 +6846,32 @@ namespace TailMsg
             }
         }
 
+        // Capacidades anunciadas para um endereço. Zero significa
+        // "desconhecido ou peer sem suporte a imagens".
+        internal int FindPeerCapabilities(string address)
+        {
+            if (String.IsNullOrEmpty(address)) return 0;
+            lock (peersLock)
+            {
+                int capabilities = 0;
+                foreach (PeerInfo peer in peers.Values)
+                {
+                    if (!String.Equals(
+                        peer.Address,
+                        address,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    if (peer.Capabilities > capabilities)
+                    {
+                        capabilities = peer.Capabilities;
+                    }
+                }
+                return capabilities;
+            }
+        }
+
         private void SendPacket(byte[] data, IPAddress address, HashSet<string> sent)
         {
             string key = address.ToString();
@@ -3090,11 +6888,16 @@ namespace TailMsg
         {
             foreach (NetworkEndpoint endpoint in NetworkDiscovery.GetEndpoints())
             {
-                AddPeer(localName, endpoint.LocalAddress, ListeningTcpPort, true);
+                AddPeer(localName, endpoint.LocalAddress, ListeningTcpPort, true, Capabilities);
             }
         }
 
-        private void AddPeer(string name, string address, int port, bool isLocal)
+        private void AddPeer(
+            string name,
+            string address,
+            int port,
+            bool isLocal,
+            int capabilities)
         {
             if (String.IsNullOrEmpty(address) || address == "0.0.0.0") return;
             IPAddress parsedAddress;
@@ -3119,6 +6922,12 @@ namespace TailMsg
                 peer.Address = address;
                 peer.Port = port;
                 peer.IsLocal = isLocal;
+                // A capacidade pode chegar por mais de uma rota de descoberta;
+                // mantém o maior valor observado para não perder suporte.
+                if (capabilities > peer.Capabilities)
+                {
+                    peer.Capabilities = capabilities;
+                }
             }
         }
     }
@@ -3909,6 +7718,23 @@ namespace TailMsg
         }
     }
 
+    // Descreve um envio binário (imagem ou áudio) para o transporte comum.
+    internal sealed class BinaryTransfer
+    {
+        public string Kind;
+        public int Capability;
+        public string ArtifactLabel;
+        public string SourceTag;
+        public string HeaderStage;
+        public string ChunksStage;
+        public string AckStage;
+        public string Fingerprint;
+        public string Detail;
+        public string HeaderLine;
+        public string EndLine;
+        public byte[] Payload;
+    }
+
     internal static class MessageSender
     {
         public static MessageSendResult Send(PeerInfo peer, string senderName, string message)
@@ -4048,6 +7874,346 @@ namespace TailMsg
             {
                 return Failed(
                     "Não foi possível entregar a mensagem: " + exception.Message,
+                    operationId,
+                    fingerprint,
+                    peer,
+                    started);
+            }
+            finally
+            {
+                try { client.Close(); } catch { }
+            }
+        }
+
+        // Envia a imagem em blocos. O destinatário confirma o cabeçalho antes
+        // dos blocos (recusa antecipada) e confirma o fim somente depois de
+        // validar tamanho, hash e assinatura PNG.
+        public static MessageSendResult SendImage(
+            PeerInfo peer,
+            string senderName,
+            ImagePayload image)
+        {
+            return SendImage(peer, senderName, image, null);
+        }
+
+        public static MessageSendResult SendImage(
+            PeerInfo peer,
+            string senderName,
+            ImagePayload image,
+            string operationId)
+        {
+            if (image == null || image.PngBytes == null || image.PngBytes.Length == 0)
+            {
+                return SendEmptyArtifact(
+                    peer,
+                    operationId,
+                    "A imagem a enviar está vazia.");
+            }
+
+            string sha256 = TailMsgProtocol.ComputeSha256Hex(image.PngBytes);
+            BinaryTransfer transfer = new BinaryTransfer();
+            transfer.Kind = "image";
+            transfer.Capability = TailMsgProtocol.CapabilityImage;
+            transfer.ArtifactLabel = "imagem";
+            transfer.SourceTag = "network-image";
+            transfer.HeaderStage = "image_header_sent";
+            transfer.ChunksStage = "image_chunks_sent";
+            transfer.AckStage = "image_ack_received";
+            transfer.Fingerprint = TailMsgDiagnostics.ComputeFingerprint(
+                senderName,
+                "image:" + sha256);
+            transfer.Detail = "bytes=" + image.PngBytes.Length +
+                ";dimensoes=" + image.Width + "x" + image.Height;
+            transfer.HeaderLine = TailMsgProtocol.BuildImageHeader(
+                senderName,
+                TailMsgProtocol.ImageFormatPng,
+                image.Width,
+                image.Height,
+                image.PngBytes.Length,
+                sha256,
+                operationId);
+            transfer.EndLine = TailMsgProtocol.BuildImageEnd(sha256);
+            transfer.Payload = image.PngBytes;
+            return SendBinary(peer, senderName, transfer, operationId);
+        }
+
+        // Áudio WAV (16 kHz mono 16 bits): mesmo transporte da imagem.
+        public static MessageSendResult SendAudio(
+            PeerInfo peer,
+            string senderName,
+            AudioPayload audio)
+        {
+            return SendAudio(peer, senderName, audio, null);
+        }
+
+        public static MessageSendResult SendAudio(
+            PeerInfo peer,
+            string senderName,
+            AudioPayload audio,
+            string operationId)
+        {
+            if (audio == null || audio.WavBytes == null || audio.WavBytes.Length == 0)
+            {
+                return SendEmptyArtifact(
+                    peer,
+                    operationId,
+                    "O áudio a enviar está vazio.");
+            }
+
+            int durationMilliseconds = audio.DurationMilliseconds;
+            if (durationMilliseconds <= 0)
+            {
+                TailMsgProtocol.TryReadWavDurationMilliseconds(
+                    audio.WavBytes,
+                    out durationMilliseconds);
+            }
+            if (durationMilliseconds <= 0)
+            {
+                return SendEmptyArtifact(
+                    peer,
+                    operationId,
+                    "O áudio a enviar não tem duração legível.");
+            }
+
+            string sha256 = TailMsgProtocol.ComputeSha256Hex(audio.WavBytes);
+            BinaryTransfer transfer = new BinaryTransfer();
+            transfer.Kind = "audio";
+            transfer.Capability = TailMsgProtocol.CapabilityAudio;
+            transfer.ArtifactLabel = "áudio";
+            transfer.SourceTag = "network-audio";
+            transfer.HeaderStage = "audio_header_sent";
+            transfer.ChunksStage = "audio_chunks_sent";
+            transfer.AckStage = "audio_ack_received";
+            transfer.Fingerprint = TailMsgDiagnostics.ComputeFingerprint(
+                senderName,
+                "audio:" + sha256);
+            transfer.Detail = "bytes=" + audio.WavBytes.Length +
+                ";duracao_ms=" + durationMilliseconds;
+            transfer.HeaderLine = TailMsgProtocol.BuildAudioHeader(
+                senderName,
+                durationMilliseconds,
+                TailMsgProtocol.AudioSampleRate,
+                TailMsgProtocol.AudioChannels,
+                TailMsgProtocol.AudioBitsPerSample,
+                audio.WavBytes.Length,
+                sha256,
+                operationId);
+            transfer.EndLine = TailMsgProtocol.BuildAudioEnd(sha256);
+            transfer.Payload = audio.WavBytes;
+            return SendBinary(peer, senderName, transfer, operationId);
+        }
+
+        private static MessageSendResult SendEmptyArtifact(
+            PeerInfo peer,
+            string operationId,
+            string message)
+        {
+            if (String.IsNullOrEmpty(operationId))
+            {
+                operationId = TailMsgDiagnostics.CreateOperationId();
+            }
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "completed",
+                "failed",
+                peer == null ? "" : peer.Name,
+                peer == null ? "" : peer.Address,
+                "",
+                0,
+                message);
+            return MessageSendResult.Failed(message, operationId, "");
+        }
+
+        // Transporte binário compartilhado (imagem e áudio): anuncia o
+        // cabeçalho, espera a confirmação do destinatário, envia os blocos e só
+        // considera entregue depois do encerramento confirmado.
+        private static MessageSendResult SendBinary(
+            PeerInfo peer,
+            string senderName,
+            BinaryTransfer transfer,
+            string operationId)
+        {
+            if (String.IsNullOrEmpty(operationId))
+            {
+                operationId = TailMsgDiagnostics.CreateOperationId();
+            }
+
+            string fingerprint = transfer.Fingerprint;
+            DateTime started = DateTime.UtcNow;
+            TailMsgDiagnostics.WriteMessageEvent(
+                operationId,
+                "attempt_started",
+                "pending",
+                peer == null ? "" : peer.Name,
+                peer == null ? "" : peer.Address,
+                fingerprint,
+                0,
+                "source=" + transfer.SourceTag + ";" + transfer.Detail);
+
+            if (peer == null || String.IsNullOrEmpty(peer.Address) || peer.Port <= 0)
+            {
+                string invalid = "O destinatário do " + transfer.ArtifactLabel +
+                    " é inválido.";
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "completed",
+                    "failed",
+                    "",
+                    "",
+                    fingerprint,
+                    ElapsedMilliseconds(started),
+                    invalid);
+                return MessageSendResult.Failed(invalid, operationId, fingerprint);
+            }
+
+            if ((peer.Capabilities & transfer.Capability) != transfer.Capability)
+            {
+                string unsupported =
+                    "O computador " + peer.Name +
+                    " usa uma versão do TailMsg sem suporte a " +
+                    transfer.ArtifactLabel + ".";
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "completed",
+                    "failed",
+                    peer.Name,
+                    peer.Address,
+                    fingerprint,
+                    ElapsedMilliseconds(started),
+                    "peer-sem-suporte");
+                return MessageSendResult.Failed(unsupported, operationId, fingerprint);
+            }
+
+            TcpClient client = new TcpClient();
+            try
+            {
+                IAsyncResult connection = client.BeginConnect(peer.Address, peer.Port, null, null);
+                if (!connection.AsyncWaitHandle.WaitOne(4000))
+                {
+                    string timeout = "O computador não respondeu na porta do TailMsg (38257). Verifique o firewall do Windows.";
+                    TailMsgDiagnostics.WriteMessageEvent(
+                        operationId,
+                        "tcp_connect",
+                        "timeout",
+                        peer.Name,
+                        peer.Address,
+                        fingerprint,
+                        ElapsedMilliseconds(started),
+                        timeout);
+                    return Failed(timeout, operationId, fingerprint, peer, started);
+                }
+
+                client.EndConnect(connection);
+                TailMsgDiagnostics.WriteMessageEvent(
+                    operationId,
+                    "tcp_connect",
+                    "success",
+                    peer.Name,
+                    peer.Address,
+                    fingerprint,
+                    ElapsedMilliseconds(started),
+                    "");
+                client.SendTimeout = 15000;
+                client.ReceiveTimeout = 15000;
+
+                using (NetworkStream stream = client.GetStream())
+                using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                {
+                    writer.WriteLine(transfer.HeaderLine);
+                    writer.Flush();
+                    TailMsgDiagnostics.WriteMessageEvent(
+                        operationId,
+                        transfer.HeaderStage,
+                        "success",
+                        peer.Name,
+                        peer.Address,
+                        fingerprint,
+                        ElapsedMilliseconds(started),
+                        "bytes=" + transfer.Payload.Length);
+
+                    string response = NetworkService.ReadLineLimited(stream, 64);
+                    bool accepted;
+                    if (!TailMsgProtocol.TryParseAcknowledgement(response, out accepted) ||
+                        !accepted)
+                    {
+                        string rejected =
+                            "O computador " + peer.Name +
+                            " não aceitou o " + transfer.ArtifactLabel + ".";
+                        TailMsgDiagnostics.WriteMessageEvent(
+                            operationId,
+                            transfer.HeaderStage,
+                            "rejected",
+                            peer.Name,
+                            peer.Address,
+                            fingerprint,
+                            ElapsedMilliseconds(started),
+                            "recusa-do-destinatario");
+                        return Failed(rejected, operationId, fingerprint, peer, started);
+                    }
+
+                    int chunks = TailMsgProtocol.CountImageChunks(transfer.Payload.Length);
+                    for (int index = 0; index < chunks; index++)
+                    {
+                        int offset = index * TailMsgProtocol.ImageChunkBytes;
+                        int count = Math.Min(
+                            TailMsgProtocol.ImageChunkBytes,
+                            transfer.Payload.Length - offset);
+                        writer.WriteLine(
+                            TailMsgProtocol.BuildImageChunk(
+                                index,
+                                Convert.ToBase64String(transfer.Payload, offset, count)));
+                    }
+                    writer.Flush();
+                    TailMsgDiagnostics.WriteMessageEvent(
+                        operationId,
+                        transfer.ChunksStage,
+                        "success",
+                        peer.Name,
+                        peer.Address,
+                        fingerprint,
+                        ElapsedMilliseconds(started),
+                        "blocos=" + chunks);
+
+                    writer.WriteLine(transfer.EndLine);
+                    writer.Flush();
+
+                    response = NetworkService.ReadLineLimited(stream, 64);
+                    if (!TailMsgProtocol.TryParseAcknowledgement(response, out accepted) ||
+                        !accepted)
+                    {
+                        string unconfirmed =
+                            "O " + transfer.ArtifactLabel +
+                            " não foi confirmado pelo computador " +
+                            peer.Name + ".";
+                        TailMsgDiagnostics.WriteMessageEvent(
+                            operationId,
+                            transfer.AckStage,
+                            "failed",
+                            peer.Name,
+                            peer.Address,
+                            fingerprint,
+                            ElapsedMilliseconds(started),
+                            "confirmacao-invalida");
+                        return Failed(unconfirmed, operationId, fingerprint, peer, started);
+                    }
+
+                    TailMsgDiagnostics.WriteMessageEvent(
+                        operationId,
+                        transfer.AckStage,
+                        "success",
+                        peer.Name,
+                        peer.Address,
+                        fingerprint,
+                        ElapsedMilliseconds(started),
+                        "");
+                    return Succeeded(operationId, fingerprint, peer, started);
+                }
+            }
+            catch (Exception exception)
+            {
+                return Failed(
+                    "Não foi possível enviar o " + transfer.ArtifactLabel + ": " +
+                    exception.Message,
                     operationId,
                     fingerprint,
                     peer,

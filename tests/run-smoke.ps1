@@ -177,10 +177,29 @@ function Run-NetworkScenario {
         "received",
         "ack_sent",
         "ack_received",
-        "completed")) {
+        "completed",
+        "image_header_sent",
+        "image_chunks_sent",
+        "image_received",
+        "image_ack_sent",
+        "image_ack_received",
+        "audio_header_sent",
+        "audio_chunks_sent",
+        "audio_received",
+        "audio_ack_sent",
+        "audio_ack_received")) {
         if (-not ($runEvents -match ("stage=" + [regex]::Escape($stage)))) {
             throw "O log integrado não contém o estágio esperado: $stage"
         }
+    }
+    if (-not ($runEvents -match "source:network-image")) {
+        throw "O log integrado não registrou a origem da transferência de imagem."
+    }
+    if (-not ($runEvents -match "source:network-audio")) {
+        throw "O log integrado não registrou a origem da transferência de áudio."
+    }
+    if (-not ($runEvents -match "result=failed.*peer-sem-suporte")) {
+        throw "O log integrado não registrou a recusa do peer sem suporte."
     }
     Write-Status "[Network] PASS"
 }

@@ -181,6 +181,26 @@ Para desenvolvimento, `Network`, `Update` e `Wine` são cenários focados. O
 cenário `Update` deve validar `service-ready` seguido de `app-confirmed`, a
 forma de argumentos do updater legado e o rollback por falha de prontidão.
 
+O cenário `Network` cobre, além da descoberta UDP, do envio TCP e do ACK de
+texto, a transferência de imagem em blocos. O log da operação precisa conter
+`image_header_sent`, `image_chunks_sent`, `image_received`, `image_ack_sent`,
+`image_ack_received`, `source:network-image` e a recusa `peer-sem-suporte`
+(peer que não anuncia a capacidade de imagem).
+
+## Validação manual de interface
+
+Os cenários automatizados não abrem janelas. Quando a mudança exigir teste
+visual, execute o binário de `dist/` com a instalação fechada: o mutex de
+instância única (`Local\TailMsg-8E47A034`) e a porta 38257 pertencem à
+instalação em `C:\Program Files\TailMsg`. `--test-instance <nome>` troca
+apenas o mutex, não as portas, portanto não permite duas instâncias com rede.
+
+`StartupRegistration.EnsureRegistered` grava
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\TailMsg` apontando para o
+executável em execução. Depois de testar o binário de `dist/`, restaure esse
+valor para a instalação e reabra o app instalado; comprove o estado final com
+o processo da instalação ativo e a porta 38257 em `Listen`.
+
 ## Diagnóstico Wine/Tailscale
 
 Quando a alteração tocar descoberta, execute em host apropriado:

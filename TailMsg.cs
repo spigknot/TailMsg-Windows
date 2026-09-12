@@ -2291,10 +2291,14 @@ namespace TailMsg
             int available = peerViewport.ClientSize.Width;
             if (available <= 0) return;
             int columns = Math.Max(1, computerList.ColumnCount);
-            int width = Math.Max(90, (available - 30) / columns - 8);
+            int width = Math.Max(90, (available - 30) / columns - 12);
             foreach (RadioButton option in DestinationOptions())
             {
-                if (option.Width != width) option.Width = width;
+                // O rádio cresce com o texto; o mínimo garante a área de clique.
+                if (option.MinimumSize.Width != width)
+                {
+                    option.MinimumSize = new Size(width, 20);
+                }
             }
         }
 
@@ -2685,23 +2689,31 @@ namespace TailMsg
                 {
                     if (!PeerBelongsToInterface(computer, iface)) continue;
 
+                    // Cada destinatário vive no seu próprio container: assim o
+                    // rádio mantém o comportamento nativo (acessível e clicável)
+                    // e ainda é possível marcar vários, sem formar grupo.
+                    Panel item = new Panel();
+                    item.AutoSize = true;
+                    item.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                    item.Margin = new Padding(0);
+                    item.BackColor = Color.White;
+
                     RadioButton option = new RadioButton();
-                    option.AutoSize = false;
-                    option.Height = 20;
-                    option.Width = 150;
+                    option.AutoSize = true;
+                    option.MinimumSize = new Size(120, 20);
                     option.Margin = new Padding(0);
                     option.Padding = new Padding(5, 0, 0, 0);
-                    // Multi-seleção: o estado é controlado no clique, sem o
-                    // comportamento de grupo do RadioButton.
-                    option.AutoCheck = false;
                     option.Text = computer.Name + (computer.IsLocal ? "  [você]" : "");
                     option.Tag = computer;
                     option.Checked = selected.Contains(computer.Address);
                     option.Cursor = Cursors.Hand;
+                    option.CheckedChanged += DestinationSelectionChanged;
+                    option.MouseDown += DestinationOptionMouseDown;
                     option.Click += DestinationOptionClick;
                     option.MouseUp += DestinationOptionMouseUp;
                     peerTooltip.SetToolTip(option, "IP: " + computer.Address);
-                    column.Controls.Add(option);
+                    item.Controls.Add(option);
+                    column.Controls.Add(item);
                 }
                 interfaceIndex++;
             }
@@ -2712,13 +2724,26 @@ namespace TailMsg
             UpdateActionStates();
         }
 
-        // Clique alterna a marca (permite escolher vários destinatários).
+        // O RadioButton nativo não se desmarca: guardamos como ele estava no
+        // MouseDown para o segundo clique poder desmarcar.
+        private bool destinationClickWasChecked;
+
+        private void DestinationOptionMouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            RadioButton option = sender as RadioButton;
+            destinationClickWasChecked = option != null && option.Checked;
+        }
+
         private void DestinationOptionClick(object sender, EventArgs e)
         {
             RadioButton option = sender as RadioButton;
             if (option == null) return;
-            option.Checked = !option.Checked;
-            UpdateActionStates();
+            if (destinationClickWasChecked && option.Checked)
+            {
+                option.Checked = false;
+                UpdateActionStates();
+            }
         }
 
         // Clique com o botão direito copia o IP daquele destinatário.
@@ -3635,6 +3660,9 @@ namespace TailMsg
                 bool sentImage = false;
                 bool sentAudio = false;
                 string failure = "";
+                // O histórico é interface: os registros são preparados aqui e
+                // aplicados na thread da UI, dentro do TryBeginInvoke.
+                List<Action> registros = new List<Action>();
 
                 // Texto, imagem e áudio viajam como mensagens separadas, nesta
                 // ordem, para o destinatário usar o botão que quiser.
@@ -3695,15 +3723,35 @@ namespace TailMsg
                         }
                     }
 
-                    RegisterSentMessages(
-                        computer,
-                        sentText && message.Length > 0, textId, message,
-                        sentImage && image != null, imageId, image,
-                        sentAudio && audio != null, audioId, audio);
+                    bool entregouTexto = textId.Length > 0;
+                    bool entregouImagem = imageId.Length > 0;
+                    bool entregouAudio = audioId.Length > 0;
+                    if (entregouTexto || entregouImagem || entregouAudio)
+                    {
+                        PeerInfo alvo = computer;
+                        string textoId = textId;
+                        string imagemId = imageId;
+                        string audioIdRegistro = audioId;
+                        registros.Add(delegate
+                        {
+                            RegisterSentMessages(
+                                alvo,
+                                entregouTexto, textoId, message,
+                                entregouImagem, imagemId, image,
+                                entregouAudio, audioIdRegistro, audio);
+                        });
+                    }
                 }
 
                 TryBeginInvoke(delegate
                 {
+                    // Agora na thread da interface: é aqui que as linhas do
+                    // histórico podem ser criadas.
+                    foreach (Action registro in registros)
+                    {
+                        registro();
+                    }
+
                     isSending = false;
 
                     // O que já foi entregue sai da tela para não ser reenviado

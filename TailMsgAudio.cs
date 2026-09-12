@@ -1818,17 +1818,21 @@ namespace TailMsg
             // painel interno com 1 px de margem, para nenhuma linha encostar na
             // borda desenhada (era o pedaço de mensagem sobre o contorno).
             AutoScroll = false;
-            // O contorno é o próprio fundo do painel aparecendo na margem de
-            // 1 px: desenhado à mão ele seria coberto pelo painel de conteúdo,
-            // e qualquer folga da barra aparece como contorno em vez de branco.
-            BackColor = BoxBorder.LineColor;
+            BackColor = Color.White;
             BorderStyle = BorderStyle.None;
-            Padding = new Padding(1, 1, 1, 1);
+            // Sem padding: a barra de rolagem fica colada na beirada direita,
+            // fora do contorno (o contorno é o fundo do viewport, abaixo).
+            Padding = new Padding(0);
             rowFont = new Font("Segoe UI", 9.5F);
 
             viewport = new Panel();
             viewport.Dock = DockStyle.Fill;
-            viewport.BackColor = Color.White;
+            // O contorno é o fundo do viewport aparecendo na margem de 1 px:
+            // desenhado à mão ele seria coberto pelo conteúdo. Como a barra de
+            // rolagem fica fora do viewport, o retângulo não a abraça, igual à
+            // caixa de mensagem.
+            viewport.BackColor = BoxBorder.LineColor;
+            viewport.Padding = new Padding(1);
             Controls.Add(viewport);
 
             content = new Panel();
@@ -1854,7 +1858,7 @@ namespace TailMsg
             get
             {
                 int width = viewport == null ? ClientSize.Width : viewport.ClientSize.Width;
-                return Math.Max(120, width - 18);
+                return Math.Max(120, width - 20);
             }
         }
 
@@ -2107,9 +2111,14 @@ namespace TailMsg
         {
             if (content == null || scrollBar == null) return;
             int offset = scrollBar.Visible ? scrollBar.Value : 0;
-            if (content.Top != -offset)
+            int top = 1 - offset;
+            if (content.Top != top)
             {
-                content.Top = -offset;
+                content.Top = top;
+            }
+            if (content.Left != 1)
+            {
+                content.Left = 1;
             }
         }
 
@@ -2129,7 +2138,7 @@ namespace TailMsg
                     int width = ContentWidth;
                     // O conteúdo precisa da largura do viewport para o texto
                     // enviado poder encostar na direita.
-                    content.Width = Math.Max(120, viewport.ClientSize.Width);
+                    content.Width = Math.Max(120, viewport.ClientSize.Width - 2);
                     int top = 0;
                     foreach (Control control in Snapshot())
                     {

@@ -1800,6 +1800,9 @@ namespace TailMsg
         private Font rowFont;
         private readonly VScrollBar scrollBar;
         private readonly Panel viewport;
+        // Painel que guarda as linhas: a rolagem só o desloca (nada de refazer
+        // o layout de todas as linhas a cada passo do arrasto).
+        private readonly Panel content;
         private bool layingOut;
 
         // Cor das mensagens enviadas (verde).
@@ -1823,12 +1826,17 @@ namespace TailMsg
             viewport.BackColor = Color.White;
             Controls.Add(viewport);
 
+            content = new Panel();
+            content.Location = new Point(0, 0);
+            content.BackColor = Color.White;
+            viewport.Controls.Add(content);
+
             scrollBar = new VScrollBar();
             scrollBar.Dock = DockStyle.Right;
             scrollBar.Width = SystemInformation.VerticalScrollBarWidth;
             scrollBar.SmallChange = 24;
             scrollBar.Visible = false;
-            scrollBar.Scroll += delegate { LayoutRows(); };
+            scrollBar.Scroll += delegate { ApplyScroll(); };
             Controls.Add(scrollBar);
         }
 
@@ -1974,7 +1982,7 @@ namespace TailMsg
             }
             InboxAudioRow audioRow = row as InboxAudioRow;
             if (audioRow != null) audioRow.StopPlayback();
-            viewport.Controls.Remove(row);
+            content.Controls.Remove(row);
             row.Dispose();
             LayoutRows();
             return true;
@@ -2008,15 +2016,15 @@ namespace TailMsg
 
         private Control[] Snapshot()
         {
-            if (viewport == null) return new Control[0];
-            Control[] children = new Control[viewport.Controls.Count];
-            viewport.Controls.CopyTo(children, 0);
+            if (content == null) return new Control[0];
+            Control[] children = new Control[content.Controls.Count];
+            content.Controls.CopyTo(children, 0);
             return children;
         }
 
         public void Clear()
         {
-            if (viewport == null) return;
+            if (content == null) return;
             if (activeRow != null)
             {
                 activeRow.StopPlayback();
@@ -2026,7 +2034,7 @@ namespace TailMsg
             {
                 InboxAudioRow audioRow = control as InboxAudioRow;
                 if (audioRow != null) audioRow.StopPlayback();
-                viewport.Controls.Remove(control);
+                content.Controls.Remove(control);
                 control.Dispose();
             }
         }
@@ -2043,11 +2051,11 @@ namespace TailMsg
 
         private void AddRow(Control row)
         {
-            if (viewport == null) return;
-            viewport.SuspendLayout();
+            if (content == null) return;
+            content.SuspendLayout();
             row.Width = ContentWidth;
-            viewport.Controls.Add(row);
-            viewport.ResumeLayout();
+            content.Controls.Add(row);
+            content.ResumeLayout();
             LayoutRows();
             ScrollToBottom();
         }
@@ -2083,14 +2091,28 @@ namespace TailMsg
             {
                 scrollBar.Value = clamped;
             }
-            LayoutRows();
+            ApplyScroll();
+        }
+
+        // Uma operação por passo de rolagem: o painel de conteúdo desloca
+        // inteiro, com as linhas dentro, em vez de reposicionar cada linha.
+        private void ApplyScroll()
+        {
+            if (content == null || scrollBar == null) return;
+            int offset = scrollBar.Visible ? scrollBar.Value : 0;
+            if (content.Top != -offset)
+            {
+                content.Top = -offset;
+            }
         }
 
         // Posiciona as linhas e ajusta a barra em passadas curtas: a largura
         // útil depende da barra, e a altura do conteúdo depende da largura.
+        // Refaz o layout do conteúdo (chamado quando algo muda: nova linha,
+        // remoção ou redimensionamento). A rolagem em si não passa por aqui.
         private void LayoutRows()
         {
-            if (layingOut || viewport == null || scrollBar == null) return;
+            if (layingOut || viewport == null || content == null || scrollBar == null) return;
             layingOut = true;
             try
             {
@@ -2098,22 +2120,19 @@ namespace TailMsg
                 {
                     bool visibleBefore = scrollBar.Visible;
                     int width = ContentWidth;
-                    int start = -scrollBar.Value;
-                    int top = start;
+                    int top = 0;
                     foreach (Control control in Snapshot())
                     {
                         control.Width = width;
-                        // O texto enviado precisa se realinhar à direita sempre
-                        // que a largura muda (inclusive ao abrir a barra).
                         InboxTextRow textRow = control as InboxTextRow;
                         if (textRow != null) textRow.LayoutRow();
                         control.Location = new Point(0, top);
                         top += control.Height + 2;
                     }
 
-                    int contentHeight = top - start;
+                    content.Height = Math.Max(0, top);
                     int viewportHeight = ViewportHeight;
-                    int overflow = Math.Max(0, contentHeight - viewportHeight);
+                    int overflow = Math.Max(0, content.Height - viewportHeight);
                     bool needed = overflow > 0;
 
                     scrollBar.LargeChange = Math.Max(1, viewportHeight / 4);
@@ -2128,12 +2147,12 @@ namespace TailMsg
                     }
                     break;
                 }
+                ApplyScroll();
             }
             finally
             {
                 layingOut = false;
             }
-            Invalidate();
         }
 
         protected override void OnPaint(PaintEventArgs e)

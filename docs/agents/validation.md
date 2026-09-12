@@ -37,7 +37,7 @@ commit:
    índice staged. Essa é a estratégia adotada para garantir que o build e os
    testes não validem uma versão diferente da que entrará no commit.
 2. `validate-harness-prefix.ps1 -RequireTracked` confirma as rotas canônicas.
-3. `lint.ps1 -Quiet` valida a sintaxe PowerShell e whitespace.
+3. `lint.ps1 -Quiet` valida a sintaxe PowerShell, o whitespace e campos privados de C# sem atribuição.
 4. `build.ps1 -Quiet` compila em diretório temporário fora do repositório.
 5. `TailMsg.exe --self-test` exercita o binário compilado.
 
@@ -146,7 +146,11 @@ As flags têm escopos distintos:
 - `tests\run-smoke.ps1 -Quiet` remove status de sucesso; processos filhos têm
   stdout/stderr capturados e só são preservados em caso de falha.
 - `scripts\lint.ps1 -Quiet` valida sintaxe PowerShell e whitespace sem saída
-  em caso de sucesso.
+  detalhada em caso de sucesso. O mesmo script roda `scripts\check-unassigned-fields.ps1`, que
+  falha quando um campo privado de `.cs` nunca recebe atribuição — campo assim
+  compila e só quebra em tempo de execução (`NullReferenceException`). Se um
+  campo for preenchido de forma que a checagem não reconheça (por exemplo
+  reflexão), marque a declaração com `// lint:allow-unassigned`.
 - `scripts\validate-release.ps1 -Quiet` é o único gate para release e retorna
   `0` em sucesso, `1` em falha e `2` quando o ambiente requerido está
   `UNVERIFIED`.

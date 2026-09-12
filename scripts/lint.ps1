@@ -61,6 +61,15 @@ try {
     }
 
     Write-Status ("PASS: lint PowerShell/whitespace ({0} scripts)" -f $scriptFiles.Count)
+
+    # Vacina contra campo privado usado e nunca atribuído: era a causa da
+    # NullReferenceException do player de áudio do popup. Ver o script para as
+    # regras da checagem (escrita direta, +=, ++ e ref/out contam como escrita).
+    & (Join-Path $projectDirectory 'scripts/check-unassigned-fields.ps1') -Quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw "campos privados sem atribuição (detalhes na mensagem acima)."
+    }
+
     exit 0
 }
 catch {

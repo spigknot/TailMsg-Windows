@@ -3977,6 +3977,7 @@ namespace TailMsg
             Font = new Font("Segoe UI", 9F);
 
             Panel body = new Panel();
+            bodyPanel = body;
             body.Dock = DockStyle.Fill;
             body.Padding = new Padding(10);
             body.BackColor = Color.FromArgb(31, 41, 55);

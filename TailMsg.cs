@@ -1543,6 +1543,8 @@ namespace TailMsg
         private Label imagePreviewLabel;
         private TableLayoutPanel contentLayout;
         private ImagePayload pendingImage;
+        private byte[] pendingFileBytes;
+        private string pendingFileName;
         private Bitmap pendingImageThumbnail;
         private AudioTrackPanel audioPreviewPanel;
         private IconButton recordButton;          // microfone branco
@@ -3059,7 +3061,7 @@ namespace TailMsg
                     extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
                 if (!ehImagem)
                 {
-                    SendFileToSelected(dialog.FileName);
+                    SetPendingFile(dialog.FileName);
                     return;
                 }
 
@@ -3176,6 +3178,40 @@ namespace TailMsg
             });
         }
 
+        // Arquivo escolhido no clipe: fica pendente (como a imagem) e só sai no
+        // ENVIAR. No lugar da miniatura aparece o ícone do clipe.
+        private void SetPendingFile(string caminho)
+        {
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(caminho);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Não foi possível ler o arquivo: " + error.Message,
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (bytes.Length == 0)
+            {
+                MessageBox.Show(this, "O arquivo está vazio.",
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            ClearPendingImage();
+            pendingFileBytes = bytes;
+            pendingFileName = Path.GetFileName(caminho);
+            imagePreviewBox.Image = AppResources.AudioIconClip();
+            imagePreviewLabel.ForeColor = Color.FromArgb(31, 41, 55);
+            imagePreviewLabel.Text = "Arquivo anexado: " + pendingFileName + " — " +
+                ImageTransfer.DescribeBytes(bytes.Length);
+            ShowImagePreview(true);
+            UpdateActionStates();
+        }
+
         private void SetPendingImage(ImagePayload image)
         {
             ClearPendingImageThumbnail();
@@ -3214,6 +3250,8 @@ namespace TailMsg
         private void ClearPendingImage()
         {
             pendingImage = null;
+            pendingFileBytes = null;
+            pendingFileName = "";
             ClearPendingImageThumbnail();
             ShowImagePreview(false);
             UpdateActionStates();
@@ -3904,6 +3942,8 @@ namespace TailMsg
             string message = messageBoxIsTranscription ? "" : messageBox.Text.Trim();
             ImagePayload image = pendingImage;
             AudioPayload audio = pendingAudio;
+            byte[] fileBytes = pendingFileBytes;
+            string fileName = pendingFileName;
 
             if (targets.Count == 0)
             {
@@ -3912,7 +3952,7 @@ namespace TailMsg
                 return;
             }
 
-            if (String.IsNullOrEmpty(message) && image == null && audio == null)
+            if (String.IsNullOrEmpty(message) && image == null && audio == null && fileBytes == null)
             {
                 MessageBox.Show(this, "Digite a mensagem, cole uma imagem com Ctrl+V ou grave um áudio.",
                     "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -3986,6 +4026,7 @@ namespace TailMsg
                                 string textId = "";
                                 string imageId = "";
                                 string audioId = "";
+                                string fileId = "";
 
                                 if (message.Length > 0)
                                 {
@@ -4038,14 +4079,33 @@ namespace TailMsg
                                     }
                                 }
 
+                                if (fileBytes != null)
+                                {
+                                    MessageSendResult fileResult = MessageSender.SendFile(
+                                        alvo, localComputerName, fileName, fileBytes, null);
+                                    if (fileResult.Success)
+                                    {
+                                        fileId = fileResult.OperationId;
+                                    }
+                                    else
+                                    {
+                                        lock (sync)
+                                        {
+                                            if (failure.Length == 0) failure = fileResult.ErrorMessage;
+                                        }
+                                    }
+                                }
+
                                 bool entregouTexto = textId.Length > 0;
                                 bool entregouImagem = imageId.Length > 0;
                                 bool entregouAudio = audioId.Length > 0;
-                                if (entregouTexto || entregouImagem || entregouAudio)
+                                bool entregouArquivo = fileId.Length > 0;
+                                if (entregouTexto || entregouImagem || entregouAudio || entregouArquivo)
                                 {
                                     string textoId = textId;
                                     string imagemId = imageId;
                                     string audioIdRegistro = audioId;
+                                    string arquivoId = fileId;
                                     lock (sync)
                                     {
                                         if (entregouTexto) sentText = true;
@@ -4059,7 +4119,8 @@ namespace TailMsg
                                                 alvo,
                                                 entregouTexto, textoId, message,
                                                 entregouImagem, imagemId, image,
-                                                entregouAudio, audioIdRegistro, audio);
+                                                entregouAudio, audioIdRegistro, audio,
+                                                entregouArquivo, arquivoId, fileBytes, fileName);
                                         });
                                     }
                                 }
@@ -4140,7 +4201,8 @@ namespace TailMsg
             PeerInfo computer,
             bool sentText, string textId, string text,
             bool sentImage, string imageId, ImagePayload image,
-            bool sentAudio, string audioId, AudioPayload audio)
+            bool sentAudio, string audioId, AudioPayload audio,
+            bool sentFile, string fileId, byte[] fileBytes, string fileName)
         {
             string stamp = DateTime.Now.ToString("HH:mm");
             string who = computer == null ? "?" : computer.Name;
@@ -4160,6 +4222,38 @@ namespace TailMsg
                 InboxTextRow row = inboxBox.AppendMessage(who, text, stamp, true, seq, textId);
                 row.Address = address;
                 inboxBox.AttachMenu(row, seq, textId, true, "");
+            }
+
+            if (sentFile && fileBytes != null)
+            {
+                string arquivo = HistoryStore.SaveMedia(
+                    fileBytes,
+                    Path.GetExtension(fileName));
+                long seq = HistoryStore.Append(new HistoryEntry
+                {
+                    Kind = "sent-file",
+                    Time = stamp,
+                    Sender = who,
+                    Address = address,
+                    Size = fileBytes.Length,
+                    FileName = arquivo,
+                    OperationId = fileId
+                });
+                InboxImageRow row = inboxBox.AppendImage(
+                    InboxPanel.FormatLine(
+                        who,
+                        "[arquivo " + ImageTransfer.DescribeBytes(fileBytes.Length) + "]",
+                        stamp,
+                        true),
+                    fileBytes,
+                    null,
+                    true,
+                    fileName);
+                row.Address = address;
+                row.Seq = seq;
+                row.OperationId = fileId;
+                row.Sent = true;
+                inboxBox.AttachMenu(row, seq, fileId, true, "");
             }
 
             if (sentImage && image != null)
@@ -4661,8 +4755,36 @@ namespace TailMsg
 
         // Carrega o histórico das últimas 24 h (ou, se não houver nada nesse
         // período, as 20 mais recentes). Ao reabrir o app volta a esse recorte.
+        // Aviso de histórico alterado por outra janela (a de resposta, por
+        // exemplo): a caixa do painel principal recarrega o recorte.
+        internal static Action HistoryChangedNotify;
+
+        internal static void NotifyHistoryChanged()
+        {
+            Action aviso = HistoryChangedNotify;
+            if (aviso == null) return;
+            try
+            {
+                aviso();
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
         private void LoadHistoryIntoInbox()
         {
+            HistoryChangedNotify = delegate
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate { RenderHistory(false); });
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            };
             RenderHistory(false);
         }
 
@@ -5010,7 +5132,7 @@ namespace TailMsg
             // capacidade (consultada pela janela principal).
             replySupportsImages = isImage;   // refinado abaixo, se houver consulta
 
-            if (isImage)
+            if (isImage && String.IsNullOrEmpty(image.FileName))
             {
                 imageThumbnail = ImageTransfer.CreateThumbnail(
                     image.ImageBytes,
@@ -5158,7 +5280,11 @@ namespace TailMsg
                 pictureBox.Dock = DockStyle.Fill;
                 pictureBox.SizeMode = PictureBoxSizeMode.Zoom;
                 pictureBox.BackColor = Color.White;
-                pictureBox.Image = imageThumbnail;
+                // Arquivo recebido: mostra o clipe no lugar da miniatura, sem
+                // tentar decodificar o conteúdo como imagem.
+                pictureBox.Image = image != null && !String.IsNullOrEmpty(image.FileName)
+                    ? AppResources.AudioIconClip()
+                    : imageThumbnail;
                 pictureBox.MouseDown += ActivateForInteraction;
                 imageBorder.Controls.Add(pictureBox);
 
@@ -5498,6 +5624,12 @@ namespace TailMsg
             destino.Name = destinatario;
             destino.Address = endereco;
             destino.Port = 38257;
+            if (PeerCapabilityLookup != null)
+            {
+                // Sem isto o destino entra com capacidades zero e o envio é
+                // recusado como "versão sem suporte".
+                destino.Capabilities = PeerCapabilityLookup(endereco);
+            }
 
             PeerInfo alvo = destino;
             byte[] conteudo = bytes;
@@ -5534,6 +5666,7 @@ namespace TailMsg
                 FileName = arquivo,
                 OperationId = ""
             });
+            MainForm.NotifyHistoryChanged();
 
         }
 
@@ -6391,6 +6524,7 @@ namespace TailMsg
                             FileName = arquivoAudio,
                             OperationId = ""
                         });
+                        MainForm.NotifyHistoryChanged();
                     }
                 }
 

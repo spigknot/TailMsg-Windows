@@ -9317,21 +9317,6 @@ namespace TailMsg
             range100.Checked = range100Enabled;
             Controls.Add(range100);
 
-            Label hint = new Label();
-            hint.Text = "Somente as interfaces marcadas aparecem na caixa de\n" +
-                "destinatários e são procuradas na rede.";
-            hint.ForeColor = Color.FromArgb(107, 114, 128);
-            hint.Location = new Point(14, 162);
-            hint.AutoSize = true;
-            Controls.Add(hint);
-
-            Label titleHistory = new Label();
-            titleHistory.Text = "Histórico";
-            titleHistory.Font = new Font("Segoe UI Semibold", 10F);
-            titleHistory.Location = new Point(14, 196);
-            titleHistory.AutoSize = true;
-            Controls.Add(titleHistory);
-
             Button cleanup = new Button();
             cleanup.Text = "Limpar histórico";
             cleanup.Size = new Size(150, 30);
@@ -9423,22 +9408,19 @@ namespace TailMsg
                 "manter as últimas 24 horas",
                 "limpar tudo"
             };
+            // Os rádios ficam direto no formulário: no mesmo container eles
+            // formam UM grupo, então marcar um desmarca o anterior. Nenhum
+            // começa marcado.
             opcoes = new RadioButton[textos.Length];
             for (int index = 0; index < textos.Length; index++)
             {
-                Panel item = new Panel();
-                item.Location = new Point(18, 100 + index * 26);
-                item.Size = new Size(340, 24);
-                item.BackColor = Color.Transparent;
-
                 RadioButton opcao = new RadioButton();
                 opcao.Text = textos[index];
                 opcao.AutoSize = true;
-                opcao.Location = new Point(0, 2);
-                opcao.Checked = index == 0;
-                item.Controls.Add(opcao);
+                opcao.Location = new Point(18, 102 + index * 26);
+                opcao.Checked = false;
                 opcoes[index] = opcao;
-                Controls.Add(item);
+                Controls.Add(opcao);
             }
 
             // Botão quadrado da vassoura: aplica a limpeza escolhida.
@@ -9454,20 +9436,20 @@ namespace TailMsg
             broom.Click += delegate { Aplicar(); };
             Controls.Add(broom);
 
-            Label broomHint = new Label();
-            broomHint.Text = "Aplicar";
-            broomHint.ForeColor = Color.FromArgb(75, 85, 99);
-            broomHint.AutoSize = true;
-            broomHint.Location = new Point(72, 252);
-            Controls.Add(broomHint);
         }
 
         private void Aplicar()
         {
-            int escolha = 0;
+            int escolha = -1;
             for (int index = 0; index < opcoes.Length; index++)
             {
                 if (opcoes[index].Checked) { escolha = index; break; }
+            }
+            if (escolha < 0)
+            {
+                MessageBox.Show(this, "Escolha uma opção antes de aplicar.",
+                    "Limpar histórico", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
             }
 
             string aviso = escolha == 4

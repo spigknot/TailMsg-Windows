@@ -2209,6 +2209,25 @@ namespace TailMsg
                 AppSettings.Range10Enabled = settings.Range10Enabled;
                 AppSettings.Range100Enabled = settings.Range100Enabled;
 
+                if (settings.HistoryKeepOption != 0)
+                {
+                    int removidas;
+                    if (settings.HistoryKeepOption == -1)
+                    {
+                        removidas = HistoryStore.DeleteAll();
+                    }
+                    else
+                    {
+                        DateTime limite = DateTime.Now.AddDays(-settings.HistoryKeepOption);
+                        removidas = HistoryStore.PruneOlderThan(limite);
+                    }
+                    RenderHistory(false);
+                    statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+                    statusLabel.Text = removidas == 1
+                        ? "Histórico limpo: 1 registro apagado."
+                        : "Histórico limpo: " + removidas + " registros apagados.";
+                }
+
                 discoveryTimer.Interval = Math.Max(5, settings.DiscoverySeconds) * 1000;
                 delegaciaCheckBox.Checked = settings.Range10Enabled;
                 tailscaleCheckBox.Checked = settings.Range100Enabled;
@@ -4463,63 +4482,152 @@ namespace TailMsg
         // Reconstroi o histórico salvo em disco no mesmo formato usado ao vivo:
         // as imagens e os áudios voltam com o botão de abrir/tocar apontando
         // para o arquivo guardado em %LOCALAPPDATA%\TailMsg\historico-midia.
+        // Índice da entrada mais antiga exibida. O resto fica guardado no disco
+        // até o usuário pedir "carregar mais mensagens".
+        private int historyFirstShown;
+
+        // Carrega o histórico das últimas 24 h (ou, se não houver nada nesse
+        // período, as 20 mais recentes). Ao reabrir o app volta a esse recorte.
         private void LoadHistoryIntoInbox()
         {
+            RenderHistory(false);
+        }
+
+        // Reexibe o histórico a partir de um recorte: false = últimas 24 h,
+        // true = mais 24 h antes do que já está na tela.
+        private void RenderHistory(bool loadMore)
+        {
             List<HistoryEntry> entries = HistoryStore.Load();
-            foreach (HistoryEntry entry in entries)
+            if (entries.Count == 0) return;
+
+            int first = historyFirstShown;
+            if (!loadMore)
             {
-                bool sent = entry.Kind != null && entry.Kind.StartsWith("sent", StringComparison.Ordinal);
-                bool isImage = entry.Kind != null && entry.Kind.EndsWith("image", StringComparison.Ordinal);
-                bool isAudio = entry.Kind != null && entry.Kind.EndsWith("audio", StringComparison.Ordinal);
-
-                if (!isImage && !isAudio)
+                DateTime corte = DateTime.Now.AddHours(-24);
+                first = entries.Count;
+                for (int index = entries.Count - 1; index >= 0; index--)
                 {
-                    InboxTextRow row = inboxBox.AppendMessage(
-                        entry.Sender, entry.Text, entry.Time, sent, entry.Seq, entry.OperationId);
-                    row.Address = entry.Address;
-                    inboxBox.AttachMenu(row, entry.Seq, entry.OperationId, sent, "");
-                    continue;
+                    if (TicksToLocalTime(entries[index].Seq) < corte) break;
+                    first = index;
+                }
+                if (first >= entries.Count)
+                {
+                    // Nada nas últimas 24 h: mostra ao menos as 20 mais recentes.
+                    first = Math.Max(0, entries.Count - 20);
+                }
+            }
+            else
+            {
+                // Mais 24 h para trás, com um mínimo de 20 mensagens.
+                DateTime limite = historyFirstShown < entries.Count
+                    ? TicksToLocalTime(entries[historyFirstShown].Seq).AddHours(-24)
+                    : DateTime.Now.AddHours(-24);
+                int candidato = historyFirstShown;
+                for (int index = historyFirstShown - 1; index >= 0; index--)
+                {
+                    if (TicksToLocalTime(entries[index].Seq) < limite) break;
+                    candidato = index;
+                }
+                if (candidato == historyFirstShown)
+                {
+                    candidato = Math.Max(0, historyFirstShown - 20);
+                }
+                first = candidato;
+            }
+
+            if (!loadMore && first == historyFirstShown && inboxBox.HasRows)
+            {
+                return;
+            }
+
+            historyFirstShown = first;
+            inboxBox.BeginBulkLoad();
+            try
+            {
+                inboxBox.Clear();
+                if (first > 0)
+                {
+                    inboxBox.AppendLoadMore(delegate { RenderHistory(true); });
                 }
 
-                string path = HistoryStore.MediaPath(entry.FileName);
-                bool exists = path.Length > 0 && File.Exists(path);
-                if (isImage)
+                for (int index = first; index < entries.Count; index++)
                 {
-                    InboxImageRow row = inboxBox.AppendImage(
-                        InboxPanel.FormatLine(
-                            entry.Sender,
-                            "[imagem " + ImageTransfer.DescribeBytes(entry.Size) + "]",
-                            entry.Time,
-                            sent),
-                        exists ? File.ReadAllBytes(path) : null,
-                        exists ? path : null);
-                    row.Address = entry.Address;
-                    row.Seq = entry.Seq;
-                    row.OperationId = entry.OperationId;
-                    row.Sent = sent;
-                    inboxBox.AttachMenu(row, entry.Seq, entry.OperationId, sent, "");
-                    continue;
+                    AppendHistoryEntry(entries[index]);
                 }
+            }
+            finally
+            {
+                inboxBox.EndBulkLoad();
+            }
+        }
 
-                if (!exists) continue;
-                AudioPayload payload = new AudioPayload();
-                payload.WavBytes = File.ReadAllBytes(path);
-                payload.DurationMilliseconds = entry.DurationMilliseconds;
-                InboxAudioRow audioRow = inboxBox.AppendAudio(
+        private static DateTime TicksToLocalTime(long ticks)
+        {
+            if (ticks <= 0) return DateTime.MinValue;
+            try
+            {
+                return new DateTime(ticks);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return DateTime.MinValue;
+            }
+        }
+
+        // Cria a linha de uma entrada do histórico (usada na carga paginada).
+        private void AppendHistoryEntry(HistoryEntry entry)
+        {
+            bool sent = entry.Kind != null && entry.Kind.StartsWith("sent", StringComparison.Ordinal);
+            bool isImage = entry.Kind != null && entry.Kind.EndsWith("image", StringComparison.Ordinal);
+            bool isAudio = entry.Kind != null && entry.Kind.EndsWith("audio", StringComparison.Ordinal);
+
+            if (!isImage && !isAudio)
+            {
+                InboxTextRow row = inboxBox.AppendMessage(
+                    entry.Sender, entry.Text, entry.Time, sent, entry.Seq, entry.OperationId);
+                row.Address = entry.Address;
+                inboxBox.AttachMenu(row, entry.Seq, entry.OperationId, sent, "");
+                return;
+            }
+
+            string path = HistoryStore.MediaPath(entry.FileName);
+            bool exists = path.Length > 0 && File.Exists(path);
+            if (isImage)
+            {
+                InboxImageRow row = inboxBox.AppendImage(
                     InboxPanel.FormatLine(
                         entry.Sender,
-                        "[áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "]",
+                        "[imagem " + ImageTransfer.DescribeBytes(entry.Size) + "]",
                         entry.Time,
                         sent),
-                    payload,
-                    entry.OperationId);
-                audioRow.Address = entry.Address;
-                audioRow.Seq = entry.Seq;
-                audioRow.OperationId = entry.OperationId;
-                audioRow.Sent = sent;
-                if (!String.IsNullOrEmpty(entry.Text)) audioRow.SetTranscription(entry.Text);
-                inboxBox.AttachMenu(audioRow, entry.Seq, entry.OperationId, sent, entry.Text);
+                    exists ? File.ReadAllBytes(path) : null,
+                    exists ? path : null);
+                row.Address = entry.Address;
+                row.Seq = entry.Seq;
+                row.OperationId = entry.OperationId;
+                row.Sent = sent;
+                inboxBox.AttachMenu(row, entry.Seq, entry.OperationId, sent, "");
+                return;
             }
+
+            if (!exists) return;
+            AudioPayload payload = new AudioPayload();
+            payload.WavBytes = File.ReadAllBytes(path);
+            payload.DurationMilliseconds = entry.DurationMilliseconds;
+            InboxAudioRow audioRow = inboxBox.AppendAudio(
+                InboxPanel.FormatLine(
+                    entry.Sender,
+                    "[áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "]",
+                    entry.Time,
+                    sent),
+                payload,
+                entry.OperationId);
+            audioRow.Address = entry.Address;
+            audioRow.Seq = entry.Seq;
+            audioRow.OperationId = entry.OperationId;
+            audioRow.Sent = sent;
+            if (!String.IsNullOrEmpty(entry.Text)) audioRow.SetTranscription(entry.Text);
+            inboxBox.AttachMenu(audioRow, entry.Seq, entry.OperationId, sent, entry.Text);
         }
 
         private void RepositionNotifications()
@@ -9162,6 +9270,10 @@ namespace TailMsg
         public bool Range10Enabled { get { return range10.Checked; } }
         public bool Range100Enabled { get { return range100.Checked; } }
 
+        // 0 = não apagar; -1 = apagar tudo; 365/30/7/1 = manter o período.
+        public int HistoryKeepOption { get; private set; }
+        private readonly ComboBox historyOptions;
+
         public SettingsForm(int discoverySeconds, bool range10Enabled, bool range100Enabled)
         {
             Text = "Configurações";
@@ -9169,7 +9281,7 @@ namespace TailMsg
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(380, 240);
+            ClientSize = new Size(380, 320);
             BackColor = Color.FromArgb(245, 247, 250);
             Font = new Font("Segoe UI", 9F);
 
@@ -9229,6 +9341,26 @@ namespace TailMsg
             hint.AutoSize = true;
             Controls.Add(hint);
 
+            Label titleHistory = new Label();
+            titleHistory.Text = "Limpar histórico";
+            titleHistory.Font = new Font("Segoe UI Semibold", 10F);
+            titleHistory.Location = new Point(14, 196);
+            titleHistory.AutoSize = true;
+            Controls.Add(titleHistory);
+
+            historyOptions = new ComboBox();
+            historyOptions.DropDownStyle = ComboBoxStyle.DropDownList;
+            historyOptions.Location = new Point(18, 224);
+            historyOptions.Width = 210;
+            historyOptions.Items.Add("Não apagar nada");
+            historyOptions.Items.Add("Manter só o último ano");
+            historyOptions.Items.Add("Manter só o último mês");
+            historyOptions.Items.Add("Manter só a última semana");
+            historyOptions.Items.Add("Manter só as últimas 24 horas");
+            historyOptions.Items.Add("Apagar tudo");
+            historyOptions.SelectedIndex = 0;
+            Controls.Add(historyOptions);
+
             Button ok = new Button();
             ok.Text = "Salvar";
             ok.Size = new Size(96, 30);
@@ -9246,6 +9378,25 @@ namespace TailMsg
             cancel.FlatStyle = FlatStyle.Flat;
             cancel.DialogResult = DialogResult.Cancel;
             Controls.Add(cancel);
+
+            // Aplicar a limpeza já no Salvar, com confirmação.
+            ok.Click += delegate
+            {
+                int escolha = historyOptions.SelectedIndex;
+                if (escolha == 0) return;
+                string aviso = escolha == 5
+                    ? "Apagar TODO o histórico?\n\nConfirma?"
+                    : "Apagar o histórico anterior a " +
+                        (escolha == 1 ? "1 ano" : escolha == 2 ? "1 mês" :
+                         escolha == 3 ? "1 semana" : "24 horas") + "?\n\nConfirma?";
+                if (MessageBox.Show(this, aviso, "Limpar histórico",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                {
+                    historyOptions.SelectedIndex = 0;
+                    return;
+                }
+                HistoryKeepOption = escolha == 5 ? -1 : escolha;
+            };
 
             AcceptButton = ok;
             CancelButton = cancel;

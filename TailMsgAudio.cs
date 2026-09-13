@@ -1813,6 +1813,29 @@ namespace TailMsg
         // o layout de todas as linhas a cada passo do arrasto).
         private readonly Panel content;
         private bool layingOut;
+        private bool bulkLoad;
+        // Altura acumulada das linhas: permite acrescentar uma linha nova sem
+        // varrer o histórico inteiro (custo constante por mensagem).
+        private int lastBottom;
+
+        // Durante a carga do histórico, o layout roda UMA vez no fim: sem isso
+        // cada linha acrescentada disparava um layout completo e a subida
+        // ficava O(n^2) (medido: 16 s com 128 entradas).
+        public void BeginBulkLoad()
+        {
+            bulkLoad = true;
+            content.SuspendLayout();
+            clip.SuspendLayout();
+        }
+
+        public void EndBulkLoad()
+        {
+            bulkLoad = false;
+            content.ResumeLayout(false);
+            clip.ResumeLayout(false);
+            LayoutRows();
+            ScrollToBottom();
+        }
 
         // Cor das mensagens enviadas (verde).
         internal static readonly Color SentColor = Color.FromArgb(22, 128, 61);
@@ -1897,6 +1920,30 @@ namespace TailMsg
             return sent
                 ? conteudo + " -> " + nome + ", " + hora
                 : hora + ", " + nome + " -> " + conteudo;
+        }
+
+        // Há linhas na tela? (usado para não refazer a carga sem necessidade)
+        public bool HasRows
+        {
+            get { return content != null && content.Controls.Count > 0; }
+        }
+
+        // Linha "carregar mais mensagens", no topo do histórico.
+        public void AppendLoadMore(EventHandler onClick)
+        {
+            if (content == null) return;
+            Button more = new Button();
+            more.Text = "Carregar mais mensagens";
+            more.FlatStyle = FlatStyle.Flat;
+            more.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
+            more.BackColor = Color.White;
+            more.ForeColor = Color.FromArgb(75, 85, 99);
+            more.Font = rowFont;
+            more.Height = 26;
+            more.Cursor = Cursors.Hand;
+            more.AccessibleName = "Carregar mais mensagens";
+            if (onClick != null) more.Click += onClick;
+            AddRow(more);
         }
 
         // Texto do histórico: recebida alinhada à esquerda, enviada à direita.
@@ -2099,8 +2146,28 @@ namespace TailMsg
             row.Width = ContentWidth;
             content.Controls.Add(row);
             content.ResumeLayout();
-            LayoutRows();
+            if (bulkLoad) return;
+
+            // Caminho rápido: a linha nova vai no fim e só ela é posicionada.
+            // O layout completo fica para quando a largura muda ou algo sai.
+            row.Location = new Point(0, lastBottom);
+            lastBottom += row.Height + 2;
+            content.Height = Math.Max(0, lastBottom);
+            UpdateScrollAfterAppend();
             ScrollToBottom();
+        }
+
+        // Ajuste O(1) da barra ao acrescentar uma linha (sem varrer o conteúdo).
+        private void UpdateScrollAfterAppend()
+        {
+            int viewportHeight = ViewportHeight;
+            int overflow = Math.Max(0, lastBottom - viewportHeight);
+            bool needed = overflow > 0;
+            scrollBar.LargeChange = Math.Max(1, viewportHeight / 4);
+            scrollBar.Maximum = overflow + scrollBar.LargeChange - 1;
+            int maximum = Math.Max(0, scrollBar.Maximum - scrollBar.LargeChange + 1);
+            if (scrollBar.Value > maximum) scrollBar.Value = maximum;
+            if (scrollBar.Visible != needed) scrollBar.Visible = needed;
         }
 
         // Mantém a última mensagem visível, como em um aplicativo de conversa.
@@ -2197,6 +2264,7 @@ namespace TailMsg
                     }
 
                     content.Height = Math.Max(0, top);
+                    lastBottom = top;
                     int viewportHeight = ViewportHeight;
                     int overflow = Math.Max(0, content.Height - viewportHeight);
                     bool needed = overflow > 0;

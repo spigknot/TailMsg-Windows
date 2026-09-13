@@ -202,6 +202,57 @@ namespace TailMsg
             }
         }
 
+        // Apaga as entradas mais antigas que o limite (e a mídia delas),
+        // mantendo o período escolhido. Devolve quantas saíram.
+        public static int PruneOlderThan(DateTime limit)
+        {
+            lock (Gate)
+            {
+                List<HistoryEntry> entries = Load();
+                List<HistoryEntry> restantes = new List<HistoryEntry>();
+                int removidas = 0;
+                foreach (HistoryEntry entry in entries)
+                {
+                    DateTime quando = DateTime.MinValue;
+                    try
+                    {
+                        quando = new DateTime(entry.Seq);
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                    }
+                    if (quando >= limit)
+                    {
+                        restantes.Add(entry);
+                        continue;
+                    }
+                    DeleteMedia(entry);
+                    removidas++;
+                }
+                if (removidas > 0) RewriteLocked(restantes);
+                return removidas;
+            }
+        }
+
+        // Apaga o histórico inteiro: índice e arquivos de mídia.
+        public static int DeleteAll()
+        {
+            lock (Gate)
+            {
+                List<HistoryEntry> entries = Load();
+                int total = entries.Count;
+                foreach (HistoryEntry entry in entries) DeleteMedia(entry);
+                try
+                {
+                    if (File.Exists(IndexPath)) File.Delete(IndexPath);
+                }
+                catch (IOException)
+                {
+                }
+                return total;
+            }
+        }
+
         // Mantém as últimas entradas e limita o tamanho total da mídia,
         // apagando os arquivos das linhas descartadas.
         private static void PruneLocked()

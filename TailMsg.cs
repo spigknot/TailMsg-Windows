@@ -3059,11 +3059,7 @@ namespace TailMsg
                     extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
                 if (!ehImagem)
                 {
-                    MessageBox.Show(this,
-                        "Por enquanto o clipe anexa imagens. O envio de outros " +
-                        "tipos de arquivo entra na próxima atualização.",
-                        "Anexar arquivo", MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
+                    SendFileToSelected(dialog.FileName);
                     return;
                 }
 
@@ -5367,15 +5363,7 @@ namespace TailMsg
             replyLiveMicButton = new IconButton();
             replyLiveMicButton.Size = new Size(22, 22);
             replyLiveMicButton.Location = new Point(420 - 95, replyRowTop);
-            // O clipe acompanha os microfones quando o layout é refeito: mesmo
-            // y e a mesma distância que se vê entre o branco e o vermelho.
-            if (replyClipButton != null)
-            {
-                // Mesmo Top do microfone branco (o replyRowTop pode diferir em
-                // 1 px por causa da escala de DPI).
-                replyClipButton.Location = new Point(
-                    420 - 147 - 52, replyMicButton.Top);
-            }
+
             replyLiveMicButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             replyLiveMicButton.AccessibleName = "Gravar na resposta com transcrição ao vivo";
 
@@ -5393,10 +5381,15 @@ namespace TailMsg
             replyClipButton.Cursor = Cursors.Hand;
             replyClipButton.Click += delegate { AttachReplyFileFromClip(); };
             body.Controls.Add(replyClipButton);
+            // Alinhamento final do clipe: roda depois de todos os botões
+            // estarem posicionados (o bloco anterior à criação é no-op, porque
+            // o clipe ainda não existia) e copia o Top do microfone branco.
+            replyClipButton.Top = replyMicButton.Top;
+            replyClipButton.Left = replyMicButton.Left - 52;
             replyLiveMicButton.Click += delegate { ToggleReplyLiveMicrophone(); };
             body.Controls.Add(replyLiveMicButton);
 
-            UpdateReplyRecordButtons();            UpdateReplyRecordButtons();
+            UpdateReplyRecordButtons();
 
             if (hasAudio) StartTranscription();
 
@@ -5462,7 +5455,88 @@ namespace TailMsg
                 MessageBoxIcon.Warning);
         }
 
-        // Anexar arquivo na resposta (por ora imagens, como no painel).
+        // Envia um arquivo qualquer de volta ao remetente, numa mensagem
+        // própria (o texto da resposta vai separado).
+        private void SendReplyFile(string caminho)
+        {
+            string destinatario = imageMessage != null
+                ? imageMessage.SenderName
+                : (audioMessage != null ? audioMessage.SenderName : "");
+            string endereco = imageMessage != null
+                ? imageMessage.RemoteAddress
+                : (audioMessage != null ? audioMessage.RemoteAddress : (remoteAddress ?? ""));
+
+            if (String.IsNullOrEmpty(endereco))
+            {
+                MessageBox.Show(this, "Não foi possível identificar o destinatário.",
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(caminho);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Não foi possível ler o arquivo: " + error.Message,
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (bytes.Length == 0)
+            {
+                MessageBox.Show(this, "O arquivo está vazio.",
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string nome = Path.GetFileName(caminho);
+            PeerInfo destino = new PeerInfo();
+            destino.Name = destinatario;
+            destino.Address = endereco;
+            destino.Port = 38257;
+
+            PeerInfo alvo = destino;
+            byte[] conteudo = bytes;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                MessageSendResult result = MessageSender.SendFile(
+                    alvo, localComputerName, nome, conteudo, null);
+                Action aviso = delegate
+                {
+                    if (!result.Success)
+                    {
+                        MessageBox.Show(this, result.ErrorMessage, "Anexar arquivo",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                };
+                try
+                {
+                    BeginInvoke(aviso);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            });
+
+            string stamp = DateTime.Now.ToString("HH:mm");
+            string arquivo = HistoryStore.SaveMedia(bytes, Path.GetExtension(nome));
+            HistoryStore.Append(new HistoryEntry
+            {
+                Kind = "sent-file",
+                Time = stamp,
+                Sender = destinatario,
+                Address = endereco,
+                Size = bytes.Length,
+                FileName = arquivo,
+                OperationId = ""
+            });
+
+        }
+
+        // Anexar arquivo na resposta (imagens e arquivos).
         private void AttachReplyFileFromClip()
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
@@ -5477,11 +5551,7 @@ namespace TailMsg
                     extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
                 if (!ehImagem)
                 {
-                    MessageBox.Show(this,
-                        "Por enquanto o clipe anexa imagens. O envio de outros " +
-                        "tipos de arquivo entra na próxima atualização.",
-                        "Anexar arquivo", MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
+                    SendReplyFile(dialog.FileName);
                     return;
                 }
 

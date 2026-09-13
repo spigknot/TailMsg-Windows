@@ -681,6 +681,11 @@ namespace TailMsg
             return LoadAudioIcon("TailMsg.IconMicRed");
         }
 
+        public static Image AudioIconBroom()
+        {
+            return LoadAudioIcon("TailMsg.IconBroom");
+        }
+
         public static Image AudioIconReload()
         {
             return LoadAudioIcon("TailMsg.IconReload");
@@ -2208,25 +2213,6 @@ namespace TailMsg
                 AppSettings.DiscoverySeconds = settings.DiscoverySeconds;
                 AppSettings.Range10Enabled = settings.Range10Enabled;
                 AppSettings.Range100Enabled = settings.Range100Enabled;
-
-                if (settings.HistoryKeepOption != 0)
-                {
-                    int removidas;
-                    if (settings.HistoryKeepOption == -1)
-                    {
-                        removidas = HistoryStore.DeleteAll();
-                    }
-                    else
-                    {
-                        DateTime limite = DateTime.Now.AddDays(-settings.HistoryKeepOption);
-                        removidas = HistoryStore.PruneOlderThan(limite);
-                    }
-                    RenderHistory(false);
-                    statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
-                    statusLabel.Text = removidas == 1
-                        ? "Histórico limpo: 1 registro apagado."
-                        : "Histórico limpo: " + removidas + " registros apagados.";
-                }
 
                 discoveryTimer.Interval = Math.Max(5, settings.DiscoverySeconds) * 1000;
                 delegaciaCheckBox.Checked = settings.Range10Enabled;
@@ -9272,10 +9258,6 @@ namespace TailMsg
         public bool Range10Enabled { get { return range10.Checked; } }
         public bool Range100Enabled { get { return range100.Checked; } }
 
-        // 0 = não apagar; -1 = apagar tudo; 365/30/7/1 = manter o período.
-        public int HistoryKeepOption { get; private set; }
-        private readonly ComboBox historyOptions;
-
         public SettingsForm(int discoverySeconds, bool range10Enabled, bool range100Enabled)
         {
             Text = "Configurações";
@@ -9344,24 +9326,28 @@ namespace TailMsg
             Controls.Add(hint);
 
             Label titleHistory = new Label();
-            titleHistory.Text = "Limpar histórico";
+            titleHistory.Text = "Histórico";
             titleHistory.Font = new Font("Segoe UI Semibold", 10F);
             titleHistory.Location = new Point(14, 196);
             titleHistory.AutoSize = true;
             Controls.Add(titleHistory);
 
-            historyOptions = new ComboBox();
-            historyOptions.DropDownStyle = ComboBoxStyle.DropDownList;
-            historyOptions.Location = new Point(18, 224);
-            historyOptions.Width = 210;
-            historyOptions.Items.Add("Não apagar nada");
-            historyOptions.Items.Add("Manter só o último ano");
-            historyOptions.Items.Add("Manter só o último mês");
-            historyOptions.Items.Add("Manter só a última semana");
-            historyOptions.Items.Add("Manter só as últimas 24 horas");
-            historyOptions.Items.Add("Apagar tudo");
-            historyOptions.SelectedIndex = 0;
-            Controls.Add(historyOptions);
+            Button cleanup = new Button();
+            cleanup.Text = "Limpar histórico";
+            cleanup.Size = new Size(150, 30);
+            cleanup.Location = new Point(18, 224);
+            cleanup.FlatStyle = FlatStyle.Flat;
+            cleanup.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
+            cleanup.BackColor = Color.White;
+            cleanup.Cursor = Cursors.Hand;
+            cleanup.Click += delegate
+            {
+                using (HistoryCleanupForm tela = new HistoryCleanupForm())
+                {
+                    tela.ShowDialog(this);
+                }
+            };
+            Controls.Add(cleanup);
 
             Button ok = new Button();
             ok.Text = "Salvar";
@@ -9381,27 +9367,137 @@ namespace TailMsg
             cancel.DialogResult = DialogResult.Cancel;
             Controls.Add(cancel);
 
-            // Aplicar a limpeza já no Salvar, com confirmação.
-            ok.Click += delegate
-            {
-                int escolha = historyOptions.SelectedIndex;
-                if (escolha == 0) return;
-                string aviso = escolha == 5
-                    ? "Apagar TODO o histórico?\n\nConfirma?"
-                    : "Apagar o histórico anterior a " +
-                        (escolha == 1 ? "1 ano" : escolha == 2 ? "1 mês" :
-                         escolha == 3 ? "1 semana" : "24 horas") + "?\n\nConfirma?";
-                if (MessageBox.Show(this, aviso, "Limpar histórico",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
-                {
-                    historyOptions.SelectedIndex = 0;
-                    return;
-                }
-                HistoryKeepOption = escolha == 5 ? -1 : escolha;
-            };
-
             AcceptButton = ok;
             CancelButton = cancel;
+        }
+    }
+
+
+    // Tela de limpeza do histórico: seta de voltar, as opções de "manter" e o
+    // botão da vassoura que aplica.
+    internal sealed class HistoryCleanupForm : Form
+    {
+        private readonly RadioButton[] opcoes;
+
+        public HistoryCleanupForm()
+        {
+            Text = "Limpar histórico";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ClientSize = new Size(390, 330);
+            BackColor = Color.FromArgb(245, 247, 250);
+            Font = new Font("Segoe UI", 9F);
+
+            Button back = new Button();
+            back.Text = "\u2190 Voltar";
+            back.Size = new Size(84, 28);
+            back.Location = new Point(10, 8);
+            back.FlatStyle = FlatStyle.Flat;
+            back.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
+            back.BackColor = Color.White;
+            back.Cursor = Cursors.Hand;
+            back.Click += delegate { Close(); };
+            Controls.Add(back);
+
+            Label title = new Label();
+            title.Text = "Limpar histórico";
+            title.Font = new Font("Segoe UI Semibold", 11F);
+            title.AutoSize = true;
+            title.Location = new Point(14, 48);
+            Controls.Add(title);
+
+            Label hint = new Label();
+            hint.Text = "Escolha o que deve ser mantido:";
+            hint.ForeColor = Color.FromArgb(75, 85, 99);
+            hint.AutoSize = true;
+            hint.Location = new Point(16, 76);
+            Controls.Add(hint);
+
+            string[] textos = new string[]
+            {
+                "manter o último ano",
+                "manter o último mês",
+                "manter a última semana",
+                "manter as últimas 24 horas",
+                "limpar tudo"
+            };
+            opcoes = new RadioButton[textos.Length];
+            for (int index = 0; index < textos.Length; index++)
+            {
+                Panel item = new Panel();
+                item.Location = new Point(18, 100 + index * 26);
+                item.Size = new Size(340, 24);
+                item.BackColor = Color.Transparent;
+
+                RadioButton opcao = new RadioButton();
+                opcao.Text = textos[index];
+                opcao.AutoSize = true;
+                opcao.Location = new Point(0, 2);
+                opcao.Checked = index == 0;
+                item.Controls.Add(opcao);
+                opcoes[index] = opcao;
+                Controls.Add(item);
+            }
+
+            // Botão quadrado da vassoura: aplica a limpeza escolhida.
+            IconButton broom = new IconButton();
+            broom.Glyph = IconGlyph.None;
+            broom.SourceImage = AppResources.AudioIconBroom();
+            broom.CircleColor = Color.White;
+            broom.CircleOutline = Color.FromArgb(209, 213, 219);
+            broom.Size = new Size(44, 44);
+            broom.Location = new Point(18, 240);
+            broom.AccessibleName = "Aplicar limpeza do histórico";
+            broom.Cursor = Cursors.Hand;
+            broom.Click += delegate { Aplicar(); };
+            Controls.Add(broom);
+
+            Label broomHint = new Label();
+            broomHint.Text = "Aplicar";
+            broomHint.ForeColor = Color.FromArgb(75, 85, 99);
+            broomHint.AutoSize = true;
+            broomHint.Location = new Point(72, 252);
+            Controls.Add(broomHint);
+        }
+
+        private void Aplicar()
+        {
+            int escolha = 0;
+            for (int index = 0; index < opcoes.Length; index++)
+            {
+                if (opcoes[index].Checked) { escolha = index; break; }
+            }
+
+            string aviso = escolha == 4
+                ? "Isto apaga TODO o histórico, incluindo as mídias recebidas.\n\nConfirma?"
+                : "O histórico anterior a " +
+                    (escolha == 0 ? "1 ano" : escolha == 1 ? "1 mês" :
+                     escolha == 2 ? "1 semana" : "24 horas") +
+                    " será apagado (com as mídias).\n\nConfirma?";
+            if (MessageBox.Show(this, aviso, "Limpar histórico",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            int removidas;
+            if (escolha == 4)
+            {
+                removidas = HistoryStore.DeleteAll();
+            }
+            else
+            {
+                int dias = escolha == 0 ? 365 : escolha == 1 ? 30 : escolha == 2 ? 7 : 1;
+                removidas = HistoryStore.PruneOlderThan(DateTime.Now.AddDays(-dias));
+            }
+
+            MessageBox.Show(this,
+                removidas == 1 ? "1 registro apagado." : removidas + " registros apagados.",
+                "Limpar histórico", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            DialogResult = DialogResult.OK;
+            Close();
         }
     }
 

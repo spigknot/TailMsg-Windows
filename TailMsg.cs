@@ -2208,6 +2208,7 @@ namespace TailMsg
                 AppSettings.Range10Enabled,
                 AppSettings.Range100Enabled))
             {
+                settings.HistoryChanged = delegate { RenderHistory(false); };
                 if (settings.ShowDialog(this) != DialogResult.OK) return;
 
                 AppSettings.DiscoverySeconds = settings.DiscoverySeconds;
@@ -9254,6 +9255,9 @@ namespace TailMsg
         private readonly CheckBox range10;
         private readonly CheckBox range100;
 
+        // Aviso para o painel principal reexibir o histórico depois da limpeza.
+        public Action HistoryChanged;
+
         public int DiscoverySeconds { get { return (int)seconds.Value; } }
         public bool Range10Enabled { get { return range10.Checked; } }
         public bool Range100Enabled { get { return range100.Checked; } }
@@ -9327,7 +9331,7 @@ namespace TailMsg
             cleanup.Cursor = Cursors.Hand;
             cleanup.Click += delegate
             {
-                using (HistoryCleanupForm tela = new HistoryCleanupForm())
+                using (HistoryCleanupForm tela = new HistoryCleanupForm(HistoryChanged))
                 {
                     tela.ShowDialog(this);
                 }
@@ -9363,9 +9367,11 @@ namespace TailMsg
     internal sealed class HistoryCleanupForm : Form
     {
         private readonly RadioButton[] opcoes;
+        private readonly Action onApplied;
 
-        public HistoryCleanupForm()
+        public HistoryCleanupForm(Action onApplied)
         {
+            this.onApplied = onApplied;
             Text = "Limpar histórico";
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -9473,6 +9479,13 @@ namespace TailMsg
             {
                 int dias = escolha == 0 ? 365 : escolha == 1 ? 30 : escolha == 2 ? 7 : 1;
                 removidas = HistoryStore.PruneOlderThan(DateTime.Now.AddDays(-dias));
+            }
+
+            // O painel principal precisa reexibir a caixa na hora: sem isto a
+            // limpeza só aparecia quando as configurações fechavam com Salvar.
+            if (onApplied != null)
+            {
+                onApplied();
             }
 
             MessageBox.Show(this,

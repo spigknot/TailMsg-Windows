@@ -2470,12 +2470,21 @@ namespace TailMsg
                 int available = Parent == null ? Width : Parent.ClientSize.Width;
                 available = Math.Max(160, available - 8);
                 prefixLabel.MaximumSize = new Size(Math.Max(80, available - openButton.Width - 12), 0);
-                openButton.Location = new Point(prefixLabel.Right + 4, 0);
+                if (Sent)
+                {
+                    // Enviada: o ícone vem primeiro e o texto depois.
+                    openButton.Location = new Point(0, 0);
+                    prefixLabel.Location = new Point(openButton.Right + 4, prefixLabel.Top);
+                }
+                else
+                {
+                    openButton.Location = new Point(prefixLabel.Right + 4, 0);
+                }
                 Height = Math.Max(openButton.Height + 2, prefixLabel.Height + 4);
 
                 // Enviada: prefixo verde e conjunto encostado na direita.
                 prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
-                int conteudo = openButton.Right;
+                int conteudo = Math.Max(openButton.Right, prefixLabel.Right);
                 if (Sent && conteudo < available)
                 {
                     int delta = available - conteudo;
@@ -2739,6 +2748,18 @@ namespace TailMsg
 
             Control[] children = new Control[Controls.Count];
             Controls.CopyTo(children, 0);
+            if (Sent && playButton != null)
+            {
+                // Enviada: o ícone vem primeiro e o texto depois.
+                List<Control> ordenado = new List<Control>();
+                ordenado.Add(playButton);
+                foreach (Control child in children)
+                {
+                    if (child != playButton) ordenado.Add(child);
+                }
+                children = ordenado.ToArray();
+            }
+
             int left = 0;
             int height = 20;
             foreach (Control child in children)

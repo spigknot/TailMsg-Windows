@@ -1979,7 +1979,10 @@ namespace TailMsg
             notifyIcon.Visible = true;
 
             discoveryTimer = new System.Windows.Forms.Timer();
-            discoveryTimer.Interval = 5000;
+            // A descoberta envia broadcast em todas as interfaces e espera as
+            // respostas: medida, ela produz picos de 7-13% a cada execução.
+            // Como a lista muda pouco, o intervalo passou de 5 s para 15 s.
+            discoveryTimer.Interval = 15000;
             discoveryTimer.Tick += delegate { RefreshComputers(); };
 
             restoreTimer = new System.Windows.Forms.Timer();

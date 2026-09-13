@@ -3095,6 +3095,91 @@ namespace TailMsg
             }
         }
 
+        // Envia um arquivo qualquer ao destinatário selecionado, numa mensagem
+        // própria, e registra no histórico (linha com o ícone do clipe).
+        private void SendFileToSelected(string caminho)
+        {
+            PeerInfo destino = GetSelectedComputer();
+            if (destino == null)
+            {
+                MessageBox.Show(this, "Escolha um computador TailMsg como destino.",
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(caminho);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Não foi possível ler o arquivo: " + error.Message,
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (bytes.Length == 0)
+            {
+                MessageBox.Show(this, "O arquivo está vazio.",
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string nome = Path.GetFileName(caminho);
+            string stamp = DateTime.Now.ToString("HH:mm");
+            statusLabel.ForeColor = Color.FromArgb(75, 85, 99);
+            statusLabel.Text = "Enviando " + nome + "...";
+
+            PeerInfo alvo = destino;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                MessageSendResult result = MessageSender.SendFile(
+                    alvo, localComputerName, nome, bytes, null);
+                TryBeginInvoke(delegate
+                {
+                    if (!result.Success)
+                    {
+                        statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
+                        statusLabel.Text = "Falha ao enviar " + nome + ".";
+                        MessageBox.Show(this, result.ErrorMessage, "TailMsg",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    string arquivo = HistoryStore.SaveMedia(bytes, Path.GetExtension(nome));
+                    long seq = HistoryStore.Append(new HistoryEntry
+                    {
+                        Kind = "sent-file",
+                        Time = stamp,
+                        Sender = alvo.Name,
+                        Address = alvo.Address,
+                        Size = bytes.Length,
+                        FileName = arquivo,
+                        OperationId = result.OperationId
+                    });
+                    InboxImageRow row = inboxBox.AppendImage(
+                        InboxPanel.FormatLine(
+                            alvo.Name,
+                            "[arquivo " + ImageTransfer.DescribeBytes(bytes.Length) + "]",
+                            stamp,
+                            true),
+                        bytes,
+                        null,
+                        true,
+                        nome);
+                    row.Address = alvo.Address;
+                    row.Seq = seq;
+                    row.OperationId = result.OperationId;
+                    row.Sent = true;
+                    inboxBox.AttachMenu(row, seq, result.OperationId, true, "");
+
+                    statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+                    statusLabel.Text = "Arquivo " + nome + " entregue a " + alvo.Name + ".";
+                });
+            });
+        }
+
         private void SetPendingImage(ImagePayload image)
         {
             ClearPendingImageThumbnail();
@@ -4307,8 +4392,13 @@ namespace TailMsg
                     FileName = imageFile,
                     OperationId = e.OperationId
                 });
+                bool ehArquivo = !String.IsNullOrEmpty(e.FileName);
                 InboxImageRow receivedImageRow = inboxBox.AppendImage(
-                    imagePrefix, e.ImageBytes, HistoryStore.MediaPath(imageFile));
+                    imagePrefix,
+                    e.ImageBytes,
+                    HistoryStore.MediaPath(imageFile),
+                    ehArquivo,
+                    ehArquivo ? e.FileName : "");
                 receivedImageRow.Address = e.RemoteAddress;
                 receivedImageRow.Seq = imageSeq;
                 receivedImageRow.OperationId = e.OperationId;
@@ -4667,6 +4757,7 @@ namespace TailMsg
             bool sent = entry.Kind != null && entry.Kind.StartsWith("sent", StringComparison.Ordinal);
             bool isImage = entry.Kind != null && entry.Kind.EndsWith("image", StringComparison.Ordinal);
             bool isAudio = entry.Kind != null && entry.Kind.EndsWith("audio", StringComparison.Ordinal);
+            bool isFile = entry.Kind != null && entry.Kind.EndsWith("file", StringComparison.Ordinal);
 
             if (!isImage && !isAudio)
             {
@@ -4684,11 +4775,14 @@ namespace TailMsg
                 InboxImageRow row = inboxBox.AppendImage(
                     InboxPanel.FormatLine(
                         entry.Sender,
-                        "[imagem " + ImageTransfer.DescribeBytes(entry.Size) + "]",
+                        "[" + (isFile ? "arquivo" : "imagem") + " " +
+                            ImageTransfer.DescribeBytes(entry.Size) + "]",
                         entry.Time,
                         sent),
                     exists ? File.ReadAllBytes(path) : null,
-                    exists ? path : null);
+                    exists ? path : null,
+                    isFile,
+                    isFile ? entry.FileName : "");
                 row.Address = entry.Address;
                 row.Seq = entry.Seq;
                 row.OperationId = entry.OperationId;
@@ -5326,7 +5420,11 @@ namespace TailMsg
             }
             if (imageMessage != null)
             {
-                capabilities |= TailMsgProtocol.CapabilityImage;
+                // Arquivo usa o mesmo transporte da imagem, mas a capacidade
+                // anunciada é a de arquivo.
+                capabilities |= String.IsNullOrEmpty(imageMessage.FileName)
+                    ? TailMsgProtocol.CapabilityImage
+                    : TailMsgProtocol.CapabilityFile;
             }
             if (audioMessage != null)
             {
@@ -6380,6 +6478,8 @@ namespace TailMsg
         public string OperationId;
         public string Fingerprint;
         public byte[] ImageBytes;
+        // Nome do arquivo quando o conteúdo recebido é um arquivo.
+        public string FileName;
         public int Width;
         public int Height;
         public string Sha256;
@@ -6457,6 +6557,9 @@ namespace TailMsg
         public const string AudioFormatWav = "wav";
         public const int CapabilityImage = 1;
         public const int CapabilityAudio = 2;
+        public const int CapabilityFile = 4;
+        // Formato no cabeçalho de imagem quando o conteúdo é um arquivo.
+        public const string ImageFormatFile = "file";
         // Formato único de captura: 16 kHz, mono, 16 bits (PCM).
         public const int AudioSampleRate = 16000;
         public const int AudioChannels = 1;
@@ -6633,6 +6736,60 @@ namespace TailMsg
                 line += "|" + operationId;
             }
             return line;
+        }
+
+        // Cabeçalho de arquivo: reusa o da imagem com o formato "file" e o nome
+        // codificado no fim da linha (o transporte de blocos é o mesmo).
+        public static string BuildFileHeader(
+            string senderName,
+            long byteCount,
+            string sha256,
+            string operationId,
+            string fileName)
+        {
+            return BuildImageHeader(
+                senderName,
+                ImageFormatFile,
+                0,
+                0,
+                byteCount,
+                sha256,
+                operationId) + "|" + Encode(fileName);
+        }
+
+        // Parser próprio do arquivo, independente do parser da imagem.
+        public static bool TryParseFileHeader(string line, out ImageHeader header)
+        {
+            header = null;
+            if (String.IsNullOrEmpty(line)) return false;
+            string[] pieces = line.Split('|');
+            if (pieces.Length < 9) return false;
+            if (pieces[0] != Image || pieces[1] != "1") return false;
+            if (pieces[3] != ImageFormatFile) return false;
+
+            ImageHeader parsed = new ImageHeader();
+            try
+            {
+                parsed.SenderName = Decode(pieces[2]);
+                parsed.FileName = Decode(pieces[pieces.Length - 1]);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+
+            long bytes;
+            if (!Int64.TryParse(pieces[6], NumberStyles.Integer,
+                CultureInfo.InvariantCulture, out bytes))
+            {
+                return false;
+            }
+            parsed.ByteCount = bytes;
+            parsed.Format = pieces[3];
+            parsed.Sha256 = pieces[7];
+            parsed.OperationId = pieces[8];
+            header = parsed;
+            return parsed.FileName.Length > 0;
         }
 
         public static bool TryParseImageHeader(string line, out ImageHeader header)
@@ -6984,6 +7141,8 @@ namespace TailMsg
         public long ByteCount;
         public string Sha256;
         public string OperationId;
+        // Nome do arquivo quando o formato é "file" (vazio nas imagens).
+        public string FileName;
     }
 
     // Imagem pronta para transporte: PNG (sem perda) e dimensões conhecidas.
@@ -7597,7 +7756,8 @@ namespace TailMsg
             string senderName = "";
 
             ImageHeader header;
-            if (!TailMsgProtocol.TryParseImageHeader(headerLine, out header))
+            if (!TailMsgProtocol.TryParseImageHeader(headerLine, out header) &&
+                !TailMsgProtocol.TryParseFileHeader(headerLine, out header))
             {
                 RejectImage(writer);
                 TailMsgDiagnostics.WriteMessageEvent(
@@ -7688,6 +7848,7 @@ namespace TailMsg
             eventArgs.OperationId = operationId;
             eventArgs.Fingerprint = fingerprint;
             eventArgs.ImageBytes = imageBytes;
+            eventArgs.FileName = header.FileName ?? "";
             eventArgs.Width = header.Width;
             eventArgs.Height = header.Height;
             eventArgs.Sha256 = header.Sha256;
@@ -9023,6 +9184,47 @@ namespace TailMsg
                 operationId);
             transfer.EndLine = TailMsgProtocol.BuildImageEnd(sha256);
             transfer.Payload = image.PngBytes;
+            return SendBinary(peer, senderName, transfer, operationId);
+        }
+
+        // Arquivo qualquer: o mesmo transporte binário da imagem/áudio, com o
+        // nome do arquivo no cabeçalho (formato "file").
+        public static MessageSendResult SendFile(
+            PeerInfo peer,
+            string senderName,
+            string fileName,
+            byte[] bytes,
+            string operationId)
+        {
+            if (bytes == null || bytes.Length == 0)
+            {
+                return SendEmptyArtifact(
+                    peer,
+                    operationId,
+                    "O arquivo a enviar está vazio.");
+            }
+
+            string sha256 = TailMsgProtocol.ComputeSha256Hex(bytes);
+            BinaryTransfer transfer = new BinaryTransfer();
+            transfer.Kind = "file";
+            transfer.Capability = TailMsgProtocol.CapabilityFile;
+            transfer.ArtifactLabel = "arquivo";
+            transfer.SourceTag = "network-file";
+            transfer.HeaderStage = "file_header_sent";
+            transfer.ChunksStage = "file_chunks_sent";
+            transfer.AckStage = "file_ack_received";
+            transfer.Fingerprint = TailMsgDiagnostics.ComputeFingerprint(
+                senderName,
+                "file:" + sha256);
+            transfer.Detail = "bytes=" + bytes.Length + ";nome=" + fileName;
+            transfer.HeaderLine = TailMsgProtocol.BuildFileHeader(
+                senderName,
+                bytes.Length,
+                sha256,
+                operationId,
+                fileName);
+            transfer.EndLine = TailMsgProtocol.BuildImageEnd(sha256);
+            transfer.Payload = bytes;
             return SendBinary(peer, senderName, transfer, operationId);
         }
 

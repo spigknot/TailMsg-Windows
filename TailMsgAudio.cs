@@ -2001,9 +2001,16 @@ namespace TailMsg
             }
         }
 
-        public InboxImageRow AppendImage(string prefix, byte[] imageBytes, string filePath)
+        public InboxImageRow AppendImage(
+            string prefix,
+            byte[] imageBytes,
+            string filePath,
+            bool asFile = false,
+            string fileName = "")
         {
-            InboxImageRow row = new InboxImageRow(prefix, imageBytes, filePath, PlayerSize, rowFont);
+            InboxImageRow row = asFile
+                ? new InboxImageRow(prefix, imageBytes, filePath, PlayerSize, rowFont, true, fileName)
+                : new InboxImageRow(prefix, imageBytes, filePath, PlayerSize, rowFont);
             AddRow(row);
             return row;
         }
@@ -2434,13 +2441,35 @@ namespace TailMsg
         private static Image imageGlyph;
         private readonly byte[] imageBytes;
         private readonly string filePath;
+        // Linha de arquivo: ícone do clipe e clique = salvar como.
+        private readonly bool asFile;
+        private readonly string fileName;
         private readonly Label prefixLabel;
         private readonly IconButton openButton;
 
-        public InboxImageRow(string prefix, byte[] imageBytes, string filePath, int iconSize, Font font)
+        public InboxImageRow(
+            string prefix,
+            byte[] imageBytes,
+            string filePath,
+            int iconSize,
+            Font font)
+            : this(prefix, imageBytes, filePath, iconSize, font, false, "")
+        {
+        }
+
+        public InboxImageRow(
+            string prefix,
+            byte[] imageBytes,
+            string filePath,
+            int iconSize,
+            Font font,
+            bool asFile,
+            string fileName)
         {
             this.imageBytes = imageBytes;
             this.filePath = filePath;
+            this.asFile = asFile;
+            this.fileName = fileName;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             BackColor = Color.White;
@@ -2455,14 +2484,27 @@ namespace TailMsg
 
             openButton = new IconButton();
             openButton.Glyph = IconGlyph.None;
-            openButton.SourceImage = LoadImageGlyph();
+            openButton.SourceImage = asFile
+                ? AppResources.AudioIconClip()
+                : LoadImageGlyph();
+            if (asFile) openButton.AccessibleName = "Salvar arquivo";
             openButton.CircleColor = Color.White;
             openButton.CircleOutline = Color.FromArgb(196, 202, 210);
             openButton.Size = new Size(iconSize, iconSize);
             openButton.Location = new Point(prefixLabel.Right + 4, 0);
             openButton.Enabled = HasImage();
             openButton.AccessibleName = "Abrir imagem";
-            openButton.Click += delegate { OpenImage(); };
+            openButton.Click += delegate
+            {
+                if (asFile)
+                {
+                    SaveFileAs();
+                }
+                else
+                {
+                    OpenImage();
+                }
+            };
             Controls.Add(openButton);
 
             Height = Math.Max(iconSize + 2, prefixLabel.Height + 4);
@@ -2552,6 +2594,35 @@ namespace TailMsg
         {
             return (imageBytes != null && imageBytes.Length > 0) ||
                 (!String.IsNullOrEmpty(filePath) && File.Exists(filePath));
+        }
+
+        // Arquivo recebido: o clique abre o "salvar como".
+        private void SaveFileAs()
+        {
+            if (imageBytes == null || imageBytes.Length == 0)
+            {
+                MessageBox.Show(this, "Este arquivo não está mais disponível.",
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "Salvar arquivo";
+                dialog.FileName = String.IsNullOrEmpty(fileName) ? "arquivo" : fileName;
+                dialog.Filter = "Todos os arquivos|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    File.WriteAllBytes(dialog.FileName, imageBytes);
+                    MessageBox.Show(this, "Arquivo salvo em " + dialog.FileName,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível salvar: " + error.Message,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
         }
 
         private void OpenImage()

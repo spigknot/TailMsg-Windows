@@ -1601,8 +1601,8 @@ namespace TailMsg
 
             Text = "TailMsg";
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(560, 620);
-            Size = new Size(680, 720);
+            MinimumSize = new Size(560, 720);
+            Size = new Size(680, 860);
             BackColor = Color.FromArgb(245, 247, 250);
             Font = new Font("Segoe UI", 9F);
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -1730,7 +1730,7 @@ namespace TailMsg
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 29F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 47F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 59F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
             // Linhas dos anexos: altura zero enquanto não houver imagem/áudio.
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
@@ -2373,6 +2373,7 @@ namespace TailMsg
 
         // Rolagem própria da lista de destinos: a barra fica fora do contorno.
         private bool peerLayingOut;
+        private bool peerRecheckPending;
 
         // Janelinhas de recebimento por operação, para fechar quando o
         // remetente pedir "Deletar para todos".
@@ -2389,6 +2390,7 @@ namespace TailMsg
         {
             if (peerViewport == null || peerScroll == null || computerList == null) return;
             if (peerLayingOut) return;
+            bool visibleAtStart = peerScroll.Visible;
             peerLayingOut = true;
             try
             {
@@ -2427,6 +2429,20 @@ namespace TailMsg
             if (peerListBorder != null)
             {
                 peerListBorder.Invalidate();
+            }
+
+            // O FlowLayoutPanel mede os filhos de forma assíncrona: quando um
+            // item passa um pouco da caixa, a barra só era decidida com a
+            // medida antiga e não aparecia. Uma re-verificação depois do layout
+            // resolve (sem entrar em laço: só agenda se o estado mudou).
+            if (peerScroll.Visible != visibleAtStart && !peerRecheckPending && IsHandleCreated)
+            {
+                peerRecheckPending = true;
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    peerRecheckPending = false;
+                    LayoutPeerList();
+                });
             }
             if (peerViewport != null)
             {

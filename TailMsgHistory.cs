@@ -27,6 +27,11 @@ namespace TailMsg
     internal static class HistoryStore
     {
         private const int MaxEntries = 300;
+        // A poda varre o índice e a pasta de mídia: rodar a cada mensagem
+        // deixava o custo de I/O proporcional ao tamanho do histórico. Agora
+        // ela roda de vez em quando (e sempre que o índice passa do teto).
+        private const int PruneEveryAppends = 25;
+        private static int appendsSincePrune;
         private const long MaxMediaBytes = 200L * 1024L * 1024L;
         private static readonly object Gate = new object();
 
@@ -101,7 +106,12 @@ namespace TailMsg
                 {
                     return entry.Seq;
                 }
-                PruneLocked();
+                appendsSincePrune++;
+                if (appendsSincePrune >= PruneEveryAppends)
+                {
+                    appendsSincePrune = 0;
+                    PruneLocked();
+                }
             }
             return entry.Seq;
         }

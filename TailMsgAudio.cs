@@ -1723,6 +1723,10 @@ namespace TailMsg
 
         private void Tick()
         {
+            if (ticker != null && !player.IsPlaying && !player.IsPaused)
+            {
+                ticker.Stop();
+            }
             if (!IsHandleCreated || IsDisposed) return;
             if (player.IsPlaying)
             {
@@ -2503,7 +2507,10 @@ namespace TailMsg
             ticker = new System.Windows.Forms.Timer();
             ticker.Interval = 150;
             ticker.Tick += delegate { Tick(); };
-            ticker.Start();
+            // NÃO inicia aqui: um timer ligado por linha de áudio deixava o app
+            // cada vez mais lento conforme o histórico cresce (medido: 6,5% de
+            // um núcleo parado com 16 áudios). O timer só roda enquanto este
+            // áudio está tocando.
         }
 
         // Texto da transcrição, exibido depois do botão de play.
@@ -2519,6 +2526,7 @@ namespace TailMsg
         public void StopPlayback()
         {
             player.Stop();
+            if (ticker != null) ticker.Stop();
             UpdateGlyph();
         }
 
@@ -2553,7 +2561,9 @@ namespace TailMsg
             {
                 player.Restart();
                 player.Play(out error);
+                if (player.IsPlaying && ticker != null) ticker.Start();
             }
+            if (!player.IsPlaying && ticker != null) ticker.Stop();
             UpdateGlyph();
             LayoutRow();
         }

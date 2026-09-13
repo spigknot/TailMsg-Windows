@@ -2567,7 +2567,13 @@ namespace TailMsg
                     {
                         latestPeers = computers;
                         List<PeerInfo> visibleComputers = GetFilteredPeers();
-                        PopulateComputers(visibleComputers);
+                        // Reconstruir a tabela a cada descoberta (5 s) recriava
+                        // todos os controles e produzia picos de CPU. Só refaz
+                        // quando a lista realmente mudou.
+                        if (PeerListChanged(visibleComputers))
+                        {
+                            PopulateComputers(visibleComputers);
+                        }
                         int remoteCount = CountRemotePeers(visibleComputers);
                         statusLabel.Text = remoteCount == 0
                             ? NetworkDiscovery.GetDiscoverySummary()
@@ -2599,6 +2605,7 @@ namespace TailMsg
         private void InterfaceFilterChanged(object sender, EventArgs e)
         {
             List<PeerInfo> visibleComputers = GetFilteredPeers();
+            // Aqui a coluna pode mudar de composição, então reconstrói sempre.
             PopulateComputers(visibleComputers);
 
             if (!delegaciaCheckBox.Checked && !tailscaleCheckBox.Checked)
@@ -2645,6 +2652,45 @@ namespace TailMsg
 
         // Uma coluna por interface marcada nas checkboxes, atualizada em tempo
         // real quando elas mudam.
+        // Compara a lista que está na tela com a recém-descoberta (endereço,
+        // nome e suporte), para evitar reconstruções desnecessárias.
+        private bool PeerListChanged(List<PeerInfo> peers)
+        {
+            List<RadioButton> options = DestinationOptions();
+            List<PeerInfo> atuais = new List<PeerInfo>();
+            foreach (RadioButton option in options)
+            {
+                PeerInfo peer = option.Tag as PeerInfo;
+                if (peer != null)
+                {
+                    if (!(option.Parent == null || option.Parent.Parent == null))
+                    {
+                        atuais.Add(peer);
+                    }
+                }
+            }
+
+            // Os controles vêm agrupados por coluna: compara como conjunto.
+            if (atuais.Count != peers.Count) return true;
+            foreach (PeerInfo peer in peers)
+            {
+                bool achou = false;
+                foreach (PeerInfo atual in atuais)
+                {
+                    if (String.Equals(atual.Address, peer.Address, StringComparison.Ordinal) &&
+                        String.Equals(atual.Name, peer.Name, StringComparison.Ordinal) &&
+                        atual.SupportsImages == peer.SupportsImages &&
+                        atual.SupportsAudio == peer.SupportsAudio)
+                    {
+                        achou = true;
+                        break;
+                    }
+                }
+                if (!achou) return true;
+            }
+            return false;
+        }
+
         private List<string> SelectedInterfaces()
         {
             List<string> interfaces = new List<string>();

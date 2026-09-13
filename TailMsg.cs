@@ -4111,12 +4111,14 @@ namespace TailMsg
                     e.SenderName, e.Message, textStamp, false, textSeq, e.OperationId);
                 receivedTextRow.Address = e.RemoteAddress;
                 inboxBox.AttachMenu(receivedTextRow, textSeq, e.OperationId, false, "");
+
                 ReceivedMessageForm notification = new ReceivedMessageForm(
                     e,
                     localComputerName,
                     delegate { ShowFromTray(); });
                 notification.PeerCapabilityLookup = networkService.FindPeerCapabilities;
                 RegisterNotification(e.OperationId, notification);
+
                 notification.StatusReporter = delegate(string text, bool isError)
                 {
                     statusLabel.ForeColor = isError

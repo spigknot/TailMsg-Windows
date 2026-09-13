@@ -2162,6 +2162,11 @@ namespace TailMsg
         {
             if (layingOut || viewport == null || clip == null || content == null || scrollBar == null) return;
             layingOut = true;
+            // Sem o SuspendLayout, cada alteração de largura/posição dispara um
+            // relayout completo do container: com o histórico cheio isso virava
+            // O(n²) e custava SEGUNDOS por mensagem (medido: 5,9 s).
+            clip.SuspendLayout();
+            content.SuspendLayout();
             try
             {
                 for (int pass = 0; pass < 3; pass++)
@@ -2179,10 +2184,15 @@ namespace TailMsg
                     int top = 0;
                     foreach (Control control in Snapshot())
                     {
-                        control.Width = width;
+                        // Só escreve quando o valor muda: cada escrita dispara
+                        // trabalho de layout/repintura no WinForms.
+                        if (control.Width != width) control.Width = width;
                         InboxTextRow textRow = control as InboxTextRow;
                         if (textRow != null) textRow.LayoutRow();
-                        control.Location = new Point(0, top);
+                        if (control.Top != top || control.Left != 0)
+                        {
+                            control.Location = new Point(0, top);
+                        }
                         top += control.Height + 2;
                     }
 
@@ -2207,6 +2217,8 @@ namespace TailMsg
             }
             finally
             {
+                content.ResumeLayout(false);
+                clip.ResumeLayout(false);
                 layingOut = false;
             }
         }
@@ -2248,23 +2260,36 @@ namespace TailMsg
 
         private bool layingOutRow;
 
+        private int lastAvailable;
+        private string lastText;
+
         public void LayoutRow()
         {
             if (layingOutRow) return;
-            layingOutRow = true;
-            try
-            {
+
             // A largura vem da própria linha (o layout do histórico já a
             // definiu), então a enviada encosta na direita da linha.
             int available = Width > 0
                 ? Width
                 : (Parent == null ? 160 : Parent.ClientSize.Width - 8);
             available = Math.Max(160, available);
+
+            // Definir MaximumSize num Label com AutoSize obriga o WinForms a
+            // remedir o texto. Com o histórico cheio isso custava SEGUNDOS por
+            // mensagem nova (medido: 5,1 s), porque toda linha era reprocessada
+            // a cada layout. Se largura e texto não mudaram, não há o que fazer.
+            if (available == lastAvailable && label.Text == lastText) return;
+
+            layingOutRow = true;
+            try
+            {
             label.MaximumSize = new Size(available, 0);
             int left = Sent ? Math.Max(0, available - label.Width) : 0;
             label.Location = new Point(left, 0);
             Width = available;
             Height = Math.Max(18, label.Height + 2);
+            lastAvailable = available;
+            lastText = label.Text;
             }
             finally
             {

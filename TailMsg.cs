@@ -5386,6 +5386,7 @@ namespace TailMsg
             // o clipe ainda não existia) e copia o Top do microfone branco.
             replyClipButton.Top = replyMicButton.Top;
             replyClipButton.Left = replyMicButton.Left - 52;
+            replyClipButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             replyLiveMicButton.Click += delegate { ToggleReplyLiveMicrophone(); };
             body.Controls.Add(replyLiveMicButton);
 
@@ -6374,6 +6375,23 @@ namespace TailMsg
                         replyAudioPayload);
                     sentAudio = audioResult.Success;
                     if (!audioResult.Success) failure = audioResult.ErrorMessage;
+                    if (sentAudio)
+                    {
+                        // O áudio enviado por esta janelinha também persiste no
+                        // histórico (o painel o reexibe ao recarregar).
+                        string arquivoAudio = HistoryStore.SaveMedia(
+                            replyAudioPayload.WavBytes, ".wav");
+                        HistoryStore.Append(new HistoryEntry
+                        {
+                            Kind = "sent-audio",
+                            Time = DateTime.Now.ToString("HH:mm"),
+                            Sender = peer.Name,
+                            Address = peer.Address,
+                            DurationMilliseconds = replyAudioPayload.DurationMilliseconds,
+                            FileName = arquivoAudio,
+                            OperationId = ""
+                        });
+                    }
                 }
 
                 if (IsDisposed || !IsHandleCreated) return;
@@ -7241,7 +7259,8 @@ namespace TailMsg
         private readonly bool allowLoopback;
         private readonly object peersLock = new object();
         internal int Capabilities =
-            TailMsgProtocol.CapabilityImage | TailMsgProtocol.CapabilityAudio;
+            TailMsgProtocol.CapabilityImage | TailMsgProtocol.CapabilityAudio |
+            TailMsgProtocol.CapabilityFile;
         private readonly Dictionary<string, PeerInfo> peers = new Dictionary<string, PeerInfo>(StringComparer.OrdinalIgnoreCase);
         private TcpListener tcpListener;
         private UdpClient udpClient;

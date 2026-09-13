@@ -2553,7 +2553,9 @@ namespace TailMsg
                 }
                 else
                 {
-                    openButton.Location = new Point(prefixLabel.Right + 4, 0);
+                    // Recebida: o ícone vem depois do texto.
+                    openButton.Location = new Point(
+                        Math.Max(4, prefixLabel.Right + 4), 0);
                 }
                 Height = Math.Max(openButton.Height + 2, prefixLabel.Height + 4);
 
@@ -2564,7 +2566,7 @@ namespace TailMsg
                 if (Sent)
                 {
                     int esquerda = Math.Max(0, available - total);
-                    if (openButton.Right > prefixLabel.Right)
+                    if (true)
                     {
                         // ordem [ícone][texto]
                         openButton.Left = esquerda;
@@ -2874,14 +2876,27 @@ namespace TailMsg
 
             Control[] children = new Control[Controls.Count];
             Controls.CopyTo(children, 0);
-            if (Sent && playButton != null)
+            if (playButton != null)
             {
-                // Enviada: o ícone vem primeiro e o texto depois.
                 List<Control> ordenado = new List<Control>();
-                ordenado.Add(playButton);
-                foreach (Control child in children)
+                if (Sent)
                 {
-                    if (child != playButton) ordenado.Add(child);
+                    // Enviada: [ícone][texto].
+                    ordenado.Add(playButton);
+                    foreach (Control child in children)
+                    {
+                        if (child != playButton) ordenado.Add(child);
+                    }
+                }
+                else
+                {
+                    // Recebida: o ícone vem depois do texto.
+                    foreach (Control child in children)
+                    {
+                        if (child == playButton) continue;
+                        ordenado.Add(child);
+                        if (child == prefixLabel) ordenado.Add(playButton);
+                    }
                 }
                 children = ordenado.ToArray();
             }

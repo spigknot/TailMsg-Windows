@@ -2232,6 +2232,8 @@ namespace TailMsg
                 delegaciaCheckBox.Checked = settings.Range10Enabled;
                 tailscaleCheckBox.Checked = settings.Range100Enabled;
                 RefreshComputers();
+                // A limpeza de histórico roda em outra tela; reexibe o recorte.
+                RenderHistory(false);
                 statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                 statusLabel.Text = "Configurações salvas.";
             }

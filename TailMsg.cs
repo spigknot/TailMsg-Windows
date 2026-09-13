@@ -1730,12 +1730,12 @@ namespace TailMsg
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 29F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 59F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 47F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
             // Linhas dos anexos: altura zero enquanto não houver imagem/áudio.
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 12F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 24F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
             content.Controls.Add(layout);
             contentLayout = layout;

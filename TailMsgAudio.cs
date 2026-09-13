@@ -2468,10 +2468,20 @@ namespace TailMsg
             try
             {
                 int available = Parent == null ? Width : Parent.ClientSize.Width;
-                available = Math.Max(160, available - 30);
+                available = Math.Max(160, available - 8);
                 prefixLabel.MaximumSize = new Size(Math.Max(80, available - openButton.Width - 12), 0);
                 openButton.Location = new Point(prefixLabel.Right + 4, 0);
                 Height = Math.Max(openButton.Height + 2, prefixLabel.Height + 4);
+
+                // Enviada: prefixo verde e conjunto encostado na direita.
+                prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
+                int conteudo = openButton.Right;
+                if (Sent && conteudo < available)
+                {
+                    int delta = available - conteudo;
+                    prefixLabel.Left += delta;
+                    openButton.Left += delta;
+                }
             }
             finally
             {
@@ -2737,6 +2747,20 @@ namespace TailMsg
                 left += child.Width + 4;
                 if (child.Height > height) height = child.Height;
             }
+
+            // Enviada: encosta na direita da linha (e o prefixo fica verde),
+            // como acontece com as mensagens de texto.
+            prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
+            int conteudo = left - 4;
+            if (Sent && conteudo < available)
+            {
+                int delta = available - conteudo;
+                foreach (Control child in children)
+                {
+                    child.Left += delta;
+                }
+            }
+
             Width = Math.Min(Math.Max(140, left), available);
             Height = Math.Max(22, height + 2);
             }

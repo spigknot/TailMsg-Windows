@@ -681,6 +681,11 @@ namespace TailMsg
             return LoadAudioIcon("TailMsg.IconMicRed");
         }
 
+        public static Image AudioIconClip()
+        {
+            return LoadAudioIcon("TailMsg.IconClip");
+        }
+
         public static Image AudioIconBroom()
         {
             return LoadAudioIcon("TailMsg.IconBroom");

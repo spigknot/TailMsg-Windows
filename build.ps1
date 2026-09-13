@@ -99,6 +99,7 @@ Invoke-Compiler @(
     "/resource:$projectDirectory\assets\imagem.png,TailMsg.IconImage",
     "/resource:$projectDirectory\assets\reload.png,TailMsg.IconReload",
     "/resource:$projectDirectory\assets\vassoura.png,TailMsg.IconBroom",
+    "/resource:$projectDirectory\assets\clipe.png,TailMsg.IconClip",
     "/out:$outputDirectory\TailMsg.exe",
     "/reference:System.dll",
     "/reference:System.Core.dll",

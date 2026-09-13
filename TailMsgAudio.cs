@@ -2553,9 +2553,12 @@ namespace TailMsg
                 }
                 else
                 {
-                    // Recebida: o ícone vem depois do texto.
+                    // Recebida: primeiro o texto, depois o ícone. O texto é
+                    // medido na hora (PreferredWidth), porque o Width do label
+                    // só é atualizado depois do layout.
+                    prefixLabel.Location = new Point(0, 0);
                     openButton.Location = new Point(
-                        Math.Max(4, prefixLabel.Right + 4), 0);
+                        Math.Max(4, prefixLabel.PreferredWidth + 4), 0);
                 }
                 Height = Math.Max(openButton.Height + 2, prefixLabel.Height + 4);
 
@@ -2565,24 +2568,12 @@ namespace TailMsg
                 int total = prefixLabel.Width + 4 + openButton.Width;
                 if (Sent)
                 {
+                    // Enviada: [ícone][texto] encostado na direita.
                     int esquerda = Math.Max(0, available - total);
-                    if (true)
-                    {
-                        // ordem [ícone][texto]
-                        openButton.Left = esquerda;
-                        prefixLabel.Left = openButton.Right + 4;
-                    }
-                    else
-                    {
-                        prefixLabel.Left = esquerda;
-                        openButton.Left = prefixLabel.Right + 4;
-                    }
-                }
-                else if (openButton.Right > prefixLabel.Right)
-                {
-                    openButton.Left = 0;
+                    openButton.Left = esquerda;
                     prefixLabel.Left = openButton.Right + 4;
                 }
+
             }
             finally
             {

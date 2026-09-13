@@ -2210,7 +2210,7 @@ namespace TailMsg
         }
 
         // Mantém a última mensagem visível, como em um aplicativo de conversa.
-        private void ScrollToBottom()
+        public void ScrollToBottom()
         {
             if (scrollBar == null || !scrollBar.Visible) return;
             SetScrollValue(scrollBar.Maximum);

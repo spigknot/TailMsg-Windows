@@ -4774,6 +4774,21 @@ namespace TailMsg
 
         private void LoadHistoryIntoInbox()
         {
+            // Ao abrir o painel a caixa já aparece no fim da conversa: o
+            // recorte carrega as mensagens mais recentes por último.
+            Shown += delegate
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    try
+                    {
+                        inboxBox.ScrollToBottom();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                    }
+                });
+            };
             HistoryChangedNotify = delegate
             {
                 if (IsDisposed || !IsHandleCreated) return;
@@ -5066,6 +5081,35 @@ namespace TailMsg
 
         // Consulta de capacidade do remetente, fornecida pela janela
         // principal. Sem ela, o anexo na resposta seria recusado sempre.
+        // Arquivo recebido: grava os bytes onde o usuário escolher.
+        private void SaveReceivedFile()
+        {
+            if (imageMessage == null || imageMessage.ImageBytes == null ||
+                imageMessage.ImageBytes.Length == 0)
+            {
+                return;
+            }
+
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "Salvar arquivo";
+                dialog.FileName = String.IsNullOrEmpty(imageMessage.FileName)
+                    ? "arquivo"
+                    : imageMessage.FileName;
+                dialog.Filter = "Todos os arquivos|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    File.WriteAllBytes(dialog.FileName, imageMessage.ImageBytes);
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível salvar: " + error.Message,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+        }
+
         internal Func<string, int> PeerCapabilityLookup;
 
         // Retorno do resultado na barra de status da janela principal, já que
@@ -5286,6 +5330,13 @@ namespace TailMsg
                     ? AppResources.AudioIconClip()
                     : imageThumbnail;
                 pictureBox.MouseDown += ActivateForInteraction;
+                if (image != null && !String.IsNullOrEmpty(image.FileName))
+                {
+                    // Arquivo recebido: o clique no clipe salva onde o usuário
+                    // escolher.
+                    pictureBox.Cursor = Cursors.Hand;
+                    pictureBox.Click += delegate { SaveReceivedFile(); };
+                }
                 imageBorder.Controls.Add(pictureBox);
 
                 if (!String.IsNullOrEmpty(imageThumbnailError))

@@ -5277,7 +5277,10 @@ namespace TailMsg
             // y e a mesma distância que se vê entre o branco e o vermelho.
             if (replyClipButton != null)
             {
-                replyClipButton.Location = new Point(420 - 147 - 52, replyRowTop);
+                // Mesmo Top do microfone branco (o replyRowTop pode diferir em
+                // 1 px por causa da escala de DPI).
+                replyClipButton.Location = new Point(
+                    420 - 147 - 52, replyMicButton.Top);
             }
             replyLiveMicButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             replyLiveMicButton.AccessibleName = "Gravar na resposta com transcrição ao vivo";

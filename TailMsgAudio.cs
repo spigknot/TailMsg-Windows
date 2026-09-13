@@ -2332,7 +2332,25 @@ namespace TailMsg
         public long Seq { get; set; }
         public string OperationId { get; set; }
         public string Address { get; set; }
-        public bool Sent { get; set; }
+
+        private bool sent;
+
+        // Definir "enviada" refaz o layout da linha: o Append* desenha antes de
+        // sabermos se ela e enviada, entao o alinhamento a direita e a cor verde
+        // (com o icone a esquerda do texto) precisam ser reaplicados.
+        public bool Sent
+        {
+            get { return sent; }
+            set
+            {
+                sent = value;
+                OnSentChanged();
+            }
+        }
+
+        protected virtual void OnSentChanged()
+        {
+        }
         public string TranscriptionText { get; set; }
     }
 
@@ -2354,9 +2372,19 @@ namespace TailMsg
             LayoutRow();
         }
 
+        protected override void OnSentChanged()
+        {
+            LayoutRow();
+        }
+
         public string Text
         {
             get { return label.Text; }
+        }
+
+        public void RefreshLayout()
+        {
+            LayoutRow();
         }
 
         private bool layingOutRow;
@@ -2442,6 +2470,11 @@ namespace TailMsg
             LayoutRow();
         }
 
+        protected override void OnSentChanged()
+        {
+            LayoutRow();
+        }
+
         // O ícone vem embutido no executável (assets/imagem.png).
         private static Image LoadImageGlyph()
         {
@@ -2482,14 +2515,29 @@ namespace TailMsg
                 }
                 Height = Math.Max(openButton.Height + 2, prefixLabel.Height + 4);
 
-                // Enviada: prefixo verde e conjunto encostado na direita.
+                // Enviada: prefixo verde e o conjunto (ícone + texto) encostado
+                // na direita da linha.
                 prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
-                int conteudo = Math.Max(openButton.Right, prefixLabel.Right);
-                if (Sent && conteudo < available)
+                int total = prefixLabel.Width + 4 + openButton.Width;
+                if (Sent)
                 {
-                    int delta = available - conteudo;
-                    prefixLabel.Left += delta;
-                    openButton.Left += delta;
+                    int esquerda = Math.Max(0, available - total);
+                    if (openButton.Right > prefixLabel.Right)
+                    {
+                        // ordem [ícone][texto]
+                        openButton.Left = esquerda;
+                        prefixLabel.Left = openButton.Right + 4;
+                    }
+                    else
+                    {
+                        prefixLabel.Left = esquerda;
+                        openButton.Left = prefixLabel.Right + 4;
+                    }
+                }
+                else if (openButton.Right > prefixLabel.Right)
+                {
+                    openButton.Left = 0;
+                    prefixLabel.Left = openButton.Right + 4;
                 }
             }
             finally
@@ -2590,6 +2638,13 @@ namespace TailMsg
 
         // Identificador da linha no histórico persistente (0 quando não gravada).
         public long HistorySeq { get; set; }
+
+        // O layout da linha precisa rodar de novo quando o estado "enviada" é
+        // definido depois da criação (o Append* já desenha a linha).
+        public void RefreshLayout()
+        {
+            LayoutRow();
+        }
 
         // O payload fica exposto para a transcrição do histórico.
         public AudioPayload Audio
@@ -2760,7 +2815,17 @@ namespace TailMsg
                 children = ordenado.ToArray();
             }
 
-            int left = 0;
+            // A linha é posicionada como uma unidade: enviada encosta na
+            // direita (ícone primeiro), recebida começa na esquerda.
+            prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
+            int total = 0;
+            foreach (Control child in children)
+            {
+                total += child.Width + 4;
+            }
+            if (total > 0) total -= 4;
+
+            int left = Sent ? Math.Max(0, available - total) : 0;
             int height = 20;
             foreach (Control child in children)
             {
@@ -2769,20 +2834,7 @@ namespace TailMsg
                 if (child.Height > height) height = child.Height;
             }
 
-            // Enviada: encosta na direita da linha (e o prefixo fica verde),
-            // como acontece com as mensagens de texto.
-            prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
-            int conteudo = left - 4;
-            if (Sent && conteudo < available)
-            {
-                int delta = available - conteudo;
-                foreach (Control child in children)
-                {
-                    child.Left += delta;
-                }
-            }
-
-            Width = Math.Min(Math.Max(140, left), available);
+            Width = Math.Min(Math.Max(140, total), available);
             Height = Math.Max(22, height + 2);
             }
             finally

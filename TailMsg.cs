@@ -1719,11 +1719,14 @@ namespace TailMsg
                     liveMicButton.Size = new Size(size, size);
                     // Clipe à esquerda; a distância entre ele e o microfone
                     // branco é a mesma que separa os dois microfones.
+                    // O clipe fica a mesma distancia que se ve entre o
+                    // microfone branco e o vermelho (o dobro do passo, porque o
+                    // botao de pausa fica no meio e costuma estar oculto).
                     clipButton.Location = new Point(0, 0);
-                    recordButton.Location = new Point(size + gap, 0);
-                    pauseButton.Location = new Point((size + gap) * 2, 0);
-                    liveMicButton.Location = new Point((size + gap) * 3, 0);
-                    actionArea.Width = (size * 4) + (gap * 3) + 12 +
+                    recordButton.Location = new Point((size + gap) * 2, 0);
+                    pauseButton.Location = new Point((size + gap) * 3, 0);
+                    liveMicButton.Location = new Point((size + gap) * 4, 0);
+                    actionArea.Width = (size * 5) + (gap * 4) + 12 +
                         sendButton.Width;
                 }
                 adjustingMicButtons = false;
@@ -5270,6 +5273,12 @@ namespace TailMsg
             replyLiveMicButton = new IconButton();
             replyLiveMicButton.Size = new Size(22, 22);
             replyLiveMicButton.Location = new Point(420 - 95, replyRowTop);
+            // O clipe acompanha os microfones quando o layout é refeito: mesmo
+            // y e a mesma distância que se vê entre o branco e o vermelho.
+            if (replyClipButton != null)
+            {
+                replyClipButton.Location = new Point(420 - 147 - 52, replyRowTop);
+            }
             replyLiveMicButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             replyLiveMicButton.AccessibleName = "Gravar na resposta com transcrição ao vivo";
 
@@ -5282,8 +5291,7 @@ namespace TailMsg
             replyClipButton.CircleOutline = Color.FromArgb(118, 130, 130);
             replyClipButton.Size = new Size(22, 22);
             replyClipButton.Location = new Point(
-                replyMicButton.Left - 30, replyMicButton.Top);
-            replyClipButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+                replyMicButton.Left - 52, replyMicButton.Top);
             replyClipButton.AccessibleName = "Anexar arquivo na resposta";
             replyClipButton.Cursor = Cursors.Hand;
             replyClipButton.Click += delegate { AttachReplyFileFromClip(); };

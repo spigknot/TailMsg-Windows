@@ -3049,8 +3049,8 @@ namespace TailMsg
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Title = "Anexar arquivo";
-                dialog.Filter = "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif|" +
-                    "Todos os arquivos|*.*";
+                dialog.Filter = "Todos os arquivos|*.*|" +
+                    "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif";
                 dialog.Multiselect = false;
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
@@ -5543,8 +5543,8 @@ namespace TailMsg
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Title = "Anexar arquivo";
-                dialog.Filter = "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif|" +
-                    "Todos os arquivos|*.*";
+                dialog.Filter = "Todos os arquivos|*.*|" +
+                    "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif";
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
 
                 string extensao = Path.GetExtension(dialog.FileName).ToLowerInvariant();

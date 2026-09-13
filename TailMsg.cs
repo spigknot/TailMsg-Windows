@@ -7898,7 +7898,11 @@ namespace TailMsg
                 out imageBytes,
                 out failure);
 
-            if (failure.Length == 0 && !IsPngSignature(imageBytes))
+            // A assinatura PNG só vale para imagens: o formato "file" trafega
+            // qualquer conteúdo pelo mesmo canal.
+            if (failure.Length == 0 &&
+                header.Format != TailMsgProtocol.ImageFormatFile &&
+                !IsPngSignature(imageBytes))
             {
                 failure = "assinatura png ausente";
                 imageBytes = null;

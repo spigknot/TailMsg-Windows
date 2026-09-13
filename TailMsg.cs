@@ -1547,7 +1547,8 @@ namespace TailMsg
         private AudioTrackPanel audioPreviewPanel;
         private IconButton recordButton;          // microfone branco
         private IconButton liveMicButton;         // microfone vermelho
-        private IconButton pauseButton;           // pausa/play do meio
+        private IconButton pauseButton;
+        private IconButton clipButton;           // pausa/play do meio
         private WaveRecorder recorder;
         private System.Windows.Forms.Timer recordingTimer;
         private AudioPayload pendingAudio;
@@ -1689,6 +1690,20 @@ namespace TailMsg
             bool adjustingMicButtons = false;
             EventHandler resizeMicButtons = delegate
             {
+                // Anexar arquivo: à esquerda do microfone branco, com a mesma
+                // distância que separa os dois microfones.
+                clipButton = new IconButton();
+                clipButton.Glyph = IconGlyph.None;
+                clipButton.SourceImage = AppResources.AudioIconClip();
+                clipButton.CircleColor = Color.White;
+                clipButton.CircleOutline = Color.FromArgb(118, 130, 130);
+                clipButton.Size = new Size(22, 22);
+                clipButton.Location = new Point(0, 0);
+                clipButton.AccessibleName = "Anexar arquivo";
+                clipButton.Cursor = Cursors.Hand;
+                clipButton.Click += delegate { AttachFileFromClip(); };
+                actionArea.Controls.Add(clipButton);
+
                 // Ordem fixa da esquerda para a direita: microfone branco,
                 // pausa e microfone vermelho — todos quadrados, com a altura do
                 // botão Enviar.
@@ -1698,13 +1713,17 @@ namespace TailMsg
                 if (size > 0)
                 {
                     int gap = 8;
+                    clipButton.Size = new Size(size, size);
                     recordButton.Size = new Size(size, size);
                     pauseButton.Size = new Size(size, size);
                     liveMicButton.Size = new Size(size, size);
-                    recordButton.Location = new Point(0, 0);
-                    pauseButton.Location = new Point(size + gap, 0);
-                    liveMicButton.Location = new Point((size + gap) * 2, 0);
-                    actionArea.Width = (size * 3) + (gap * 2) + 12 +
+                    // Clipe à esquerda; a distância entre ele e o microfone
+                    // branco é a mesma que separa os dois microfones.
+                    clipButton.Location = new Point(0, 0);
+                    recordButton.Location = new Point(size + gap, 0);
+                    pauseButton.Location = new Point((size + gap) * 2, 0);
+                    liveMicButton.Location = new Point((size + gap) * 3, 0);
+                    actionArea.Width = (size * 4) + (gap * 3) + 12 +
                         sendButton.Width;
                 }
                 adjustingMicButtons = false;
@@ -3018,6 +3037,59 @@ namespace TailMsg
             if (e == null || String.IsNullOrEmpty(e.ErrorMessage)) return;
             statusLabel.ForeColor = Color.FromArgb(185, 28, 28);
             statusLabel.Text = e.ErrorMessage;
+        }
+
+        // Abre o seletor de arquivos. Imagens entram pelo caminho normal
+        // (miniatura); os demais arquivos ainda não têm transporte próprio.
+        private void AttachFileFromClip()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "Anexar arquivo";
+                dialog.Filter = "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif|" +
+                    "Todos os arquivos|*.*";
+                dialog.Multiselect = false;
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+                string extensao = Path.GetExtension(dialog.FileName).ToLowerInvariant();
+                bool ehImagem = extensao == ".png" || extensao == ".jpg" ||
+                    extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
+                if (!ehImagem)
+                {
+                    MessageBox.Show(this,
+                        "Por enquanto o clipe anexa imagens. O envio de outros " +
+                        "tipos de arquivo entra na próxima atualização.",
+                        "Anexar arquivo", MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                try
+                {
+                    // Normaliza para PNG (o transporte exige PNG).
+                    using (Image origem = Image.FromFile(dialog.FileName))
+                    using (Bitmap copia = new Bitmap(origem))
+                    using (MemoryStream buffer = new MemoryStream())
+                    {
+                        copia.Save(buffer, System.Drawing.Imaging.ImageFormat.Png);
+                        byte[] png = buffer.ToArray();
+                        ImagePayload payload = new ImagePayload();
+                        payload.PngBytes = png;
+                        payload.Width = copia.Width;
+                        payload.Height = copia.Height;
+                        SetPendingImage(payload);
+                        statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+                        statusLabel.Text = (copia.Width + "x" + copia.Height +
+                            " — " + ImageTransfer.DescribeBytes(png.Length) +
+                            " anexados. Clique em Enviar.");
+                    }
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível anexar: " + error.Message,
+                        "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
         }
 
         private void SetPendingImage(ImagePayload image)
@@ -4746,6 +4818,7 @@ namespace TailMsg
         private IconButton replyMicButton;
         private IconButton replyPauseButton;
         private IconButton replyLiveMicButton;
+        private IconButton replyClipButton;
         private WaveRecorder replyRecorder;
         private System.Windows.Forms.Timer replyRecordingTimer;
         private bool replyRecording;
@@ -5199,6 +5272,22 @@ namespace TailMsg
             replyLiveMicButton.Location = new Point(420 - 95, replyRowTop);
             replyLiveMicButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             replyLiveMicButton.AccessibleName = "Gravar na resposta com transcrição ao vivo";
+
+            // Anexar arquivo na resposta: à esquerda do microfone branco, com a
+            // mesma distância que separa os dois microfones.
+            replyClipButton = new IconButton();
+            replyClipButton.Glyph = IconGlyph.None;
+            replyClipButton.SourceImage = AppResources.AudioIconClip();
+            replyClipButton.CircleColor = Color.White;
+            replyClipButton.CircleOutline = Color.FromArgb(118, 130, 130);
+            replyClipButton.Size = new Size(22, 22);
+            replyClipButton.Location = new Point(
+                replyMicButton.Left - 30, replyMicButton.Top);
+            replyClipButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            replyClipButton.AccessibleName = "Anexar arquivo na resposta";
+            replyClipButton.Cursor = Cursors.Hand;
+            replyClipButton.Click += delegate { AttachReplyFileFromClip(); };
+            body.Controls.Add(replyClipButton);
             replyLiveMicButton.Click += delegate { ToggleReplyLiveMicrophone(); };
             body.Controls.Add(replyLiveMicButton);
 
@@ -5262,6 +5351,51 @@ namespace TailMsg
                 "TailMsg",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
+        }
+
+        // Anexar arquivo na resposta (por ora imagens, como no painel).
+        private void AttachReplyFileFromClip()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "Anexar arquivo";
+                dialog.Filter = "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif|" +
+                    "Todos os arquivos|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+                string extensao = Path.GetExtension(dialog.FileName).ToLowerInvariant();
+                bool ehImagem = extensao == ".png" || extensao == ".jpg" ||
+                    extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
+                if (!ehImagem)
+                {
+                    MessageBox.Show(this,
+                        "Por enquanto o clipe anexa imagens. O envio de outros " +
+                        "tipos de arquivo entra na próxima atualização.",
+                        "Anexar arquivo", MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
+
+                try
+                {
+                    using (Image origem = Image.FromFile(dialog.FileName))
+                    using (Bitmap copia = new Bitmap(origem))
+                    using (MemoryStream buffer = new MemoryStream())
+                    {
+                        copia.Save(buffer, System.Drawing.Imaging.ImageFormat.Png);
+                        ImagePayload payload = new ImagePayload();
+                        payload.PngBytes = buffer.ToArray();
+                        payload.Width = copia.Width;
+                        payload.Height = copia.Height;
+                        SetReplyAttachment(payload);
+                    }
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível anexar: " + error.Message,
+                        "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
         }
 
         private void SetReplyAttachment(ImagePayload image)

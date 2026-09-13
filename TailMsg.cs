@@ -2214,12 +2214,14 @@ namespace TailMsg
                 AppSettings.DiscoverySeconds = settings.DiscoverySeconds;
                 AppSettings.Range10Enabled = settings.Range10Enabled;
                 AppSettings.Range100Enabled = settings.Range100Enabled;
+                AppSettings.HistoryHours = settings.HistoryHours;
 
                 discoveryTimer.Interval = Math.Max(5, settings.DiscoverySeconds) * 1000;
                 delegaciaCheckBox.Checked = settings.Range10Enabled;
                 tailscaleCheckBox.Checked = settings.Range100Enabled;
                 RefreshComputers();
-                // A limpeza de histórico roda em outra tela; reexibe o recorte.
+                // A limpeza de histórico roda em outra tela; reexibe o recorte
+                // (também quando só as horas exibidas mudaram).
                 RenderHistory(false);
                 statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
                 statusLabel.Text = "Configurações salvas.";
@@ -4492,7 +4494,7 @@ namespace TailMsg
             int first = historyFirstShown;
             if (!loadMore)
             {
-                DateTime corte = DateTime.Now.AddHours(-24);
+                DateTime corte = DateTime.Now.AddHours(-AppSettings.HistoryHours);
                 first = entries.Count;
                 for (int index = entries.Count - 1; index >= 0; index--)
                 {
@@ -9201,6 +9203,13 @@ namespace TailMsg
             set { WriteInt("DiscoverySeconds", Math.Max(5, Math.Min(600, value))); }
         }
 
+        // Quantas horas de histórico exibir ao abrir (padrão: 24).
+        public static int HistoryHours
+        {
+            get { return Math.Max(1, Math.Min(8760, ReadInt("HistoryHours", 24))); }
+            set { WriteInt("HistoryHours", Math.Max(1, Math.Min(8760, value))); }
+        }
+
         public static bool Range10Enabled
         {
             get { return ReadInt("Range10Enabled", 1) != 0; }
@@ -9257,6 +9266,12 @@ namespace TailMsg
 
         // Aviso para o painel principal reexibir o histórico depois da limpeza.
         public Action HistoryChanged;
+        private readonly NumericUpDown historyHoursControl;
+
+        public int HistoryHours
+        {
+            get { return (int)historyHoursControl.Value; }
+        }
 
         public int DiscoverySeconds { get { return (int)seconds.Value; } }
         public bool Range10Enabled { get { return range10.Checked; } }
@@ -9321,10 +9336,31 @@ namespace TailMsg
             range100.Checked = range100Enabled;
             Controls.Add(range100);
 
+            Label every2 = new Label();
+            every2.Text = "Mostrar as últimas";
+            every2.Location = new Point(14, 196);
+            every2.AutoSize = true;
+            Controls.Add(every2);
+
+            NumericUpDown historyHours = new NumericUpDown();
+            historyHours.Minimum = 1;
+            historyHours.Maximum = 8760;
+            historyHours.Value = AppSettings.HistoryHours;
+            historyHours.Location = new Point(130, 193);
+            historyHours.Width = 70;
+            Controls.Add(historyHours);
+
+            Label unit2 = new Label();
+            unit2.Text = "horas de histórico";
+            unit2.Location = new Point(208, 196);
+            unit2.AutoSize = true;
+            Controls.Add(unit2);
+            historyHoursControl = historyHours;
+
             Button cleanup = new Button();
             cleanup.Text = "Limpar histórico";
             cleanup.Size = new Size(150, 30);
-            cleanup.Location = new Point(18, 224);
+            cleanup.Location = new Point(18, 226);
             cleanup.FlatStyle = FlatStyle.Flat;
             cleanup.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
             cleanup.BackColor = Color.White;

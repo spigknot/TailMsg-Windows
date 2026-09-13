@@ -1812,6 +1812,10 @@ namespace TailMsg
         // Painel que guarda as linhas: a rolagem só o desloca (nada de refazer
         // o layout de todas as linhas a cada passo do arrasto).
         private readonly Panel content;
+        private readonly ContextMenuStrip sharedMenu;
+        private readonly ToolStripMenuItem menuTranscription;
+        private readonly ToolStripMenuItem menuDelete;
+        private readonly ToolStripMenuItem menuDeleteAll;
         private bool layingOut;
         private bool bulkLoad;
         // Altura acumulada das linhas: permite acrescentar uma linha nova sem
@@ -1891,6 +1895,22 @@ namespace TailMsg
             scrollBar.Visible = false;
             scrollBar.Scroll += delegate { ApplyScroll(); };
             scrollStrip.Controls.Add(scrollBar);
+
+            sharedMenu = new ContextMenuStrip();
+            sharedMenu.Font = rowFont;
+            menuTranscription = new ToolStripMenuItem("");
+            menuTranscription.Font = new Font(rowFont, FontStyle.Italic);
+            menuTranscription.ForeColor = Color.FromArgb(75, 85, 99);
+            menuTranscription.Enabled = false;
+            menuDelete = new ToolStripMenuItem("Deletar");
+            menuDelete.Click += SharedMenuDelete;
+            menuDeleteAll = new ToolStripMenuItem("Deletar para todos");
+            menuDeleteAll.Click += SharedMenuDeleteAll;
+            sharedMenu.Items.Add(menuTranscription);
+            sharedMenu.Items.Add(new ToolStripSeparator());
+            sharedMenu.Items.Add(menuDelete);
+            sharedMenu.Items.Add(menuDeleteAll);
+            sharedMenu.Opening += delegate { ConfigureSharedMenu(); };
         }
 
         // O layout pode rodar antes do viewport existir (o próprio construtor
@@ -2008,8 +2028,9 @@ namespace TailMsg
             return row;
         }
 
-        // Menu de contexto das linhas: deletar, deletar para todos e (nos
-        // áudios) a transcrição entre aspas e em itálico.
+        // Menu de contexto UNICO para todas as linhas: antes cada linha criava
+        // o seu (uma janela por linha), o que pesa na abertura com historico
+        // grande. Os itens sao configurados no Opening, conforme a linha.
         public void AttachMenu(
             Control row,
             long seq,
@@ -2017,38 +2038,49 @@ namespace TailMsg
             bool sent,
             string transcription)
         {
-            ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Font = rowFont;
+            InboxRowBase baseRow = row as InboxRowBase;
+            if (baseRow == null) return;
+            baseRow.Seq = seq;
+            baseRow.OperationId = operationId;
+            baseRow.Sent = sent;
+            baseRow.TranscriptionText = transcription;
+            row.ContextMenuStrip = sharedMenu;
+        }
 
-            if (!String.IsNullOrEmpty(transcription))
+        private InboxRowBase RowUnderMenu()
+        {
+            Control atual = sharedMenu.SourceControl;
+            while (atual != null)
             {
-                ToolStripMenuItem quote = new ToolStripMenuItem("\"" + transcription + "\"");
-                quote.Font = new Font(rowFont, FontStyle.Italic);
-                quote.ForeColor = Color.FromArgb(75, 85, 99);
-                quote.Enabled = false;
-                menu.Items.Add(quote);
-                menu.Items.Add(new ToolStripSeparator());
+                InboxRowBase linha = atual as InboxRowBase;
+                if (linha != null) return linha;
+                atual = atual.Parent;
             }
+            return null;
+        }
 
-            InboxRowBase rowBase = row as InboxRowBase;
-            string address = rowBase == null ? "" : rowBase.Address;
+        private void ConfigureSharedMenu()
+        {
+            InboxRowBase linha = RowUnderMenu();
+            if (linha == null) return;
+            bool temTranscricao = !linha.Sent && !String.IsNullOrEmpty(linha.TranscriptionText);
+            menuTranscription.Visible = temTranscricao;
+            menuTranscription.Text = temTranscricao ? "\"" + linha.TranscriptionText + "\"" : "";
+            menuDeleteAll.Visible = linha.Sent && !String.IsNullOrEmpty(linha.OperationId);
+        }
 
-            ToolStripMenuItem delete = new ToolStripMenuItem("Deletar");
-            delete.Click += delegate { RaiseDelete(seq, operationId, address, false); };
-            menu.Items.Add(delete);
+        private void SharedMenuDelete(object sender, EventArgs e)
+        {
+            InboxRowBase linha = RowUnderMenu();
+            if (linha == null) return;
+            RaiseDelete(linha.Seq, linha.OperationId, linha.Address, false);
+        }
 
-            if (sent && !String.IsNullOrEmpty(operationId))
-            {
-                ToolStripMenuItem everywhere = new ToolStripMenuItem("Deletar para todos");
-                everywhere.Click += delegate { RaiseDelete(seq, operationId, address, true); };
-                menu.Items.Add(everywhere);
-            }
-
-            row.ContextMenuStrip = menu;
-            foreach (Control child in row.Controls)
-            {
-                child.ContextMenuStrip = menu;
-            }
+        private void SharedMenuDeleteAll(object sender, EventArgs e)
+        {
+            InboxRowBase linha = RowUnderMenu();
+            if (linha == null) return;
+            RaiseDelete(linha.Seq, linha.OperationId, linha.Address, true);
         }
 
         private void RaiseDelete(long seq, string operationId, string address, bool forEveryone)
@@ -2301,6 +2333,7 @@ namespace TailMsg
         public string OperationId { get; set; }
         public string Address { get; set; }
         public bool Sent { get; set; }
+        public string TranscriptionText { get; set; }
     }
 
     // Linha de mensagem de texto: recebida à esquerda, enviada à direita.

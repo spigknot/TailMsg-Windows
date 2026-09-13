@@ -681,6 +681,11 @@ namespace TailMsg
             return LoadAudioIcon("TailMsg.IconMicRed");
         }
 
+        public static Image AudioIconReload()
+        {
+            return LoadAudioIcon("TailMsg.IconReload");
+        }
+
         public static Image AudioIconImage()
         {
             return LoadAudioIcon("TailMsg.IconImage");
@@ -1606,6 +1611,7 @@ namespace TailMsg
             mainMenu.ForeColor = Color.FromArgb(31, 41, 55);
             mainMenu.Font = new Font("Segoe UI", 9F);
             mainMenu.Padding = new Padding(8, 2, 0, 2);
+            mainMenu.Items.Add(new ToolStripMenuItem("Configurações", null, delegate { OpenSettings(); }));
             mainMenu.Items.Add(new ToolStripMenuItem("Verificar Atualizações", null, delegate { CheckForUpdates(true); }));
             mainMenu.Items.Add(new ToolStripMenuItem("Sobre", null, delegate { OpenAbout(); }));
             Controls.Add(mainMenu);
@@ -1759,7 +1765,10 @@ namespace TailMsg
             Panel interfacePanel = new Panel();
             interfacePanel.Dock = DockStyle.Fill;
             interfacePanel.Margin = new Padding(0, 0, 14, 0);
-            destinationArea.Controls.Add(interfacePanel, 0, 0);
+            // A escolha das interfaces passou para Configurações; a coluna fica
+            // com largura zero para a caixa de destinatários usar o espaço.
+            interfacePanel.Visible = false;
+            destinationArea.ColumnStyles[0].Width = 0F;
 
             Label interfaceLabel = new Label();
             interfaceLabel.AutoSize = true;
@@ -1789,15 +1798,29 @@ namespace TailMsg
             computerLabel.Location = new Point(0, 5);
             computerHeader.Controls.Add(computerLabel);
 
+            // Ícone de atualizar: mesmo tamanho dos ícones do histórico (22 px),
+            // entre o título e o contador de destinatários.
+            IconButton refreshPeers = new IconButton();
+            refreshPeers.Glyph = IconGlyph.None;
+            refreshPeers.SourceImage = AppResources.AudioIconReload();
+            refreshPeers.CircleColor = Color.White;
+            refreshPeers.CircleOutline = Color.FromArgb(209, 213, 219);
+            refreshPeers.Size = new Size(22, 22);
+            refreshPeers.Location = new Point(154, 3);
+            refreshPeers.AccessibleName = "Atualizar lista de destinatários";
+            refreshPeers.Cursor = Cursors.Hand;
+            refreshPeers.Click += delegate { RefreshComputers(); };
+            computerHeader.Controls.Add(refreshPeers);
+
             countLabel = new Label();
             countLabel.AutoSize = true;
             countLabel.ForeColor = Color.FromArgb(107, 114, 128);
-            countLabel.Location = new Point(175, 7);
+            countLabel.Location = new Point(182, 7);
             computerHeader.Controls.Add(countLabel);
 
             delegaciaCheckBox = new CheckBox();
             delegaciaCheckBox.AutoSize = true;
-            delegaciaCheckBox.Checked = true;
+            delegaciaCheckBox.Checked = AppSettings.Range10Enabled;
             delegaciaCheckBox.Text = "Rede 10.x.x.x";
             delegaciaCheckBox.Location = new Point(0, 36);
             delegaciaCheckBox.CheckedChanged += InterfaceFilterChanged;
@@ -1805,7 +1828,7 @@ namespace TailMsg
 
             tailscaleCheckBox = new CheckBox();
             tailscaleCheckBox.AutoSize = true;
-            tailscaleCheckBox.Checked = true;
+            tailscaleCheckBox.Checked = AppSettings.Range100Enabled;
             tailscaleCheckBox.Text = "Tailscale 100.x.x.x";
             tailscaleCheckBox.Location = new Point(0, 66);
             tailscaleCheckBox.CheckedChanged += InterfaceFilterChanged;
@@ -1982,7 +2005,7 @@ namespace TailMsg
             // A descoberta envia broadcast em todas as interfaces e espera as
             // respostas: medida, ela produz picos de 7-13% a cada execução.
             // Como a lista muda pouco, o intervalo passou de 5 s para 15 s.
-            discoveryTimer.Interval = 15000;
+            discoveryTimer.Interval = Math.Max(5, AppSettings.DiscoverySeconds) * 1000;
             discoveryTimer.Tick += delegate { RefreshComputers(); };
 
             restoreTimer = new System.Windows.Forms.Timer();
@@ -2169,6 +2192,30 @@ namespace TailMsg
                     }
                 });
             });
+        }
+
+        // Abre a janela de configurações (frequência da atualização e
+        // interfaces exibidas) com os valores atuais.
+        private void OpenSettings()
+        {
+            using (SettingsForm settings = new SettingsForm(
+                AppSettings.DiscoverySeconds,
+                AppSettings.Range10Enabled,
+                AppSettings.Range100Enabled))
+            {
+                if (settings.ShowDialog(this) != DialogResult.OK) return;
+
+                AppSettings.DiscoverySeconds = settings.DiscoverySeconds;
+                AppSettings.Range10Enabled = settings.Range10Enabled;
+                AppSettings.Range100Enabled = settings.Range100Enabled;
+
+                discoveryTimer.Interval = Math.Max(5, settings.DiscoverySeconds) * 1000;
+                delegaciaCheckBox.Checked = settings.Range10Enabled;
+                tailscaleCheckBox.Checked = settings.Range100Enabled;
+                RefreshComputers();
+                statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+                statusLabel.Text = "Configurações salvas.";
+            }
         }
 
         private void OpenAbout()
@@ -7495,6 +7542,16 @@ namespace TailMsg
             try { udpClient.Send(response, response.Length, remote); } catch { }
         }
 
+        // Só procura na rede nas faixas que o usuário marcou em Configurações:
+        // as interfaces desmarcadas não recebem nem enviam descoberta.
+        private static bool IsEnabledRange(IPAddress address)
+        {
+            if (address == null) return false;
+            if (NetworkDiscovery.IsTailscaleAddress(address)) return AppSettings.Range100Enabled;
+            if (NetworkDiscovery.IsDelegaciaAddress(address)) return AppSettings.Range10Enabled;
+            return true;
+        }
+
         private void SendDiscoveryPackets()
         {
             string request = TailMsgProtocol.BuildDiscoveryRequest(localName);
@@ -7505,14 +7562,18 @@ namespace TailMsg
             {
                 IPAddress address;
                 if (!String.IsNullOrEmpty(endpoint.BroadcastAddress) &&
-                    IPAddress.TryParse(endpoint.BroadcastAddress, out address))
+                    IPAddress.TryParse(endpoint.BroadcastAddress, out address) &&
+                    IsEnabledRange(address))
                 {
                     SendPacket(data, address, sent);
                 }
             }
-            foreach (IPAddress address in TailscaleDiscovery.FindPeerAddresses())
+            if (AppSettings.Range100Enabled)
             {
-                SendPacket(data, address, sent);
+                foreach (IPAddress address in TailscaleDiscovery.FindPeerAddresses())
+                {
+                    SendPacket(data, address, sent);
+                }
             }
 
             // Broadcast limitado: alcança a rede local mesmo quando a
@@ -9028,4 +9089,165 @@ namespace TailMsg
             return (long)(DateTime.UtcNow - started).TotalMilliseconds;
         }
     }
+
+    // Preferências do usuário, lembradas entre execuções.
+    internal static class AppSettings
+    {
+        private const string KeyPath = @"Software\\TailMsg";
+
+        // Frequência da atualização da lista de destinatários (padrão 30 s).
+        public static int DiscoverySeconds
+        {
+            get { return ReadInt("DiscoverySeconds", 30); }
+            set { WriteInt("DiscoverySeconds", Math.Max(5, Math.Min(600, value))); }
+        }
+
+        public static bool Range10Enabled
+        {
+            get { return ReadInt("Range10Enabled", 1) != 0; }
+            set { WriteInt("Range10Enabled", value ? 1 : 0); }
+        }
+
+        public static bool Range100Enabled
+        {
+            get { return ReadInt("Range100Enabled", 1) != 0; }
+            set { WriteInt("Range100Enabled", value ? 1 : 0); }
+        }
+
+        private static int ReadInt(string name, int fallback)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(KeyPath))
+                {
+                    if (key == null) return fallback;
+                    object value = key.GetValue(name);
+                    if (value == null) return fallback;
+                    int parsed;
+                    return Int32.TryParse(value.ToString(), out parsed) ? parsed : fallback;
+                }
+            }
+            catch (Exception)
+            {
+                return fallback;
+            }
+        }
+
+        private static void WriteInt(string name, int value)
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(KeyPath))
+                {
+                    if (key == null) return;
+                    key.SetValue(name, value, RegistryValueKind.DWord);
+                }
+            }
+            catch (Exception)
+            {
+            }
+        }
+    }
+
+    // Janela de configurações: frequência de atualização e interfaces exibidas.
+    internal sealed class SettingsForm : Form
+    {
+        private readonly NumericUpDown seconds;
+        private readonly CheckBox range10;
+        private readonly CheckBox range100;
+
+        public int DiscoverySeconds { get { return (int)seconds.Value; } }
+        public bool Range10Enabled { get { return range10.Checked; } }
+        public bool Range100Enabled { get { return range100.Checked; } }
+
+        public SettingsForm(int discoverySeconds, bool range10Enabled, bool range100Enabled)
+        {
+            Text = "Configurações";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ClientSize = new Size(380, 240);
+            BackColor = Color.FromArgb(245, 247, 250);
+            Font = new Font("Segoe UI", 9F);
+
+            Label titleDiscovery = new Label();
+            titleDiscovery.Text = "Atualização da lista de destinatários";
+            titleDiscovery.Font = new Font("Segoe UI Semibold", 10F);
+            titleDiscovery.Location = new Point(14, 12);
+            titleDiscovery.AutoSize = true;
+            Controls.Add(titleDiscovery);
+
+            Label every = new Label();
+            every.Text = "Atualizar a cada";
+            every.Location = new Point(14, 44);
+            every.AutoSize = true;
+            Controls.Add(every);
+
+            seconds = new NumericUpDown();
+            seconds.Minimum = 5;
+            seconds.Maximum = 600;
+            seconds.Value = Math.Max(5, Math.Min(600, discoverySeconds));
+            seconds.Location = new Point(112, 41);
+            seconds.Width = 70;
+            Controls.Add(seconds);
+
+            Label unit = new Label();
+            unit.Text = "segundos";
+            unit.Location = new Point(190, 44);
+            unit.AutoSize = true;
+            Controls.Add(unit);
+
+            Label titleInterfaces = new Label();
+            titleInterfaces.Text = "Interfaces exibidas";
+            titleInterfaces.Font = new Font("Segoe UI Semibold", 10F);
+            titleInterfaces.Location = new Point(14, 84);
+            titleInterfaces.AutoSize = true;
+            Controls.Add(titleInterfaces);
+
+            range10 = new CheckBox();
+            range10.Text = "Rede 10.x.x.x";
+            range10.Location = new Point(18, 112);
+            range10.AutoSize = true;
+            range10.Checked = range10Enabled;
+            Controls.Add(range10);
+
+            range100 = new CheckBox();
+            range100.Text = "Tailscale 100.x.x.x";
+            range100.Location = new Point(18, 136);
+            range100.AutoSize = true;
+            range100.Checked = range100Enabled;
+            Controls.Add(range100);
+
+            Label hint = new Label();
+            hint.Text = "Somente as interfaces marcadas aparecem na caixa de\n" +
+                "destinatários e são procuradas na rede.";
+            hint.ForeColor = Color.FromArgb(107, 114, 128);
+            hint.Location = new Point(14, 162);
+            hint.AutoSize = true;
+            Controls.Add(hint);
+
+            Button ok = new Button();
+            ok.Text = "Salvar";
+            ok.Size = new Size(96, 30);
+            ok.Location = new Point(ClientSize.Width - 210, ClientSize.Height - 42);
+            ok.BackColor = Color.White;
+            ok.FlatStyle = FlatStyle.Flat;
+            ok.DialogResult = DialogResult.OK;
+            Controls.Add(ok);
+
+            Button cancel = new Button();
+            cancel.Text = "Cancelar";
+            cancel.Size = new Size(96, 30);
+            cancel.Location = new Point(ClientSize.Width - 108, ClientSize.Height - 42);
+            cancel.BackColor = Color.White;
+            cancel.FlatStyle = FlatStyle.Flat;
+            cancel.DialogResult = DialogResult.Cancel;
+            Controls.Add(cancel);
+
+            AcceptButton = ok;
+            CancelButton = cancel;
+        }
+    }
+
 }

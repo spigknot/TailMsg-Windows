@@ -97,6 +97,7 @@ Invoke-Compiler @(
     "/resource:$projectDirectory\assets\mic_vermelho.png,TailMsg.IconMicRed",
     "/resource:$projectDirectory\assets\pause.png,TailMsg.IconPause",
     "/resource:$projectDirectory\assets\imagem.png,TailMsg.IconImage",
+    "/resource:$projectDirectory\assets\reload.png,TailMsg.IconReload",
     "/out:$outputDirectory\TailMsg.exe",
     "/reference:System.dll",
     "/reference:System.Core.dll",

@@ -1566,6 +1566,10 @@ namespace TailMsg
         private string liveCommittedText = "";
         private string liveDraftText = "";
         private int liveCommitOffset;
+        // Áudio já enviado cuja transcrição ainda pode chegar: o texto que vier
+        // depois é gravado no histórico em vez de voltar para a caixa.
+        private string audioTranscriptionId = "";
+        private long audioTranscriptionSeq;
         private int liveLastDraftBytes;
         private int liveGeneration;
         private bool liveCommitBusy;
@@ -3484,6 +3488,10 @@ namespace TailMsg
             recorder = candidate;
             isRecordingAudio = true;
             recordingLive = live;
+            // Nova gravação: transcrição atrasada da anterior já foi tratada no
+            // envio dela; este alvo é de quem ainda vai ser enviado agora.
+            audioTranscriptionId = "";
+            audioTranscriptionSeq = 0;
             isPausedAudio = false;
             diagnosticTicks = 0;
             TailMsgDiagnostics.WriteMessageEvent(
@@ -3739,6 +3747,25 @@ namespace TailMsg
             return committed + " " + draft;
         }
 
+        // O texto transcrito vai para onde deve: na caixa enquanto a mensagem
+        // ainda não foi enviada; no histórico (e no menu da linha) quando o
+        // envio já aconteceu — o usuário pode enviar antes de a transcrição
+        // chegar.
+        private void AplicarTranscricaoGravada(string texto, bool gravar)
+        {
+            bool jaEnviado = audioTranscriptionSeq != 0 ||
+                !String.IsNullOrEmpty(audioTranscriptionId);
+            if (jaEnviado)
+            {
+                if (gravar)
+                {
+                    TranscriptionCache.Store(audioTranscriptionId, audioTranscriptionSeq, texto);
+                }
+                return;
+            }
+            SetAudioTranscriptionText(texto);
+        }
+
         // Microfone branco: transcreve o áudio já encerrado, uma única vez.
         private void StartAudioTranscription(AudioPayload audio)
         {
@@ -3761,7 +3788,7 @@ namespace TailMsg
                 {
                     if (ok)
                     {
-                        SetAudioTranscriptionText(text);
+                        AplicarTranscricaoGravada(text, true);
                         TranscriptionCache.Remember(operationId, text);
                     }
                     else
@@ -3846,7 +3873,7 @@ namespace TailMsg
                         liveCommitOffset = commitEndBytes;
                         liveLastDraftBytes = commitEndBytes;
                         TranscriptionCache.Remember(operationId, text);
-                        SetAudioTranscriptionText(LiveTranscriptionText());
+                        AplicarTranscricaoGravada(LiveTranscriptionText(), true);
                         return;
                     }
 
@@ -3861,7 +3888,7 @@ namespace TailMsg
                         return;
                     }
                     liveDraftText = text;
-                    SetAudioTranscriptionText(LiveTranscriptionText());
+                    AplicarTranscricaoGravada(LiveTranscriptionText(), false);
                 });
             });
         }
@@ -3895,7 +3922,7 @@ namespace TailMsg
                     {
                         ShowAudioStatus("Não foi possível transcrever: " + error, true);
                     }
-                    SetAudioTranscriptionText(LiveTranscriptionText());
+                    AplicarTranscricaoGravada(LiveTranscriptionText(), true);
                 });
             });
         }
@@ -4261,6 +4288,8 @@ namespace TailMsg
                     Address = address,
                     Size = fileBytes.Length,
                     FileName = arquivo,
+                    // Nome original do arquivo (o menu e o "salvar como" usam).
+                    Text = fileName ?? "",
                     OperationId = fileId
                 });
                 InboxImageRow row = inboxBox.AppendImage(
@@ -4329,6 +4358,19 @@ namespace TailMsg
                 row.OperationId = audioId;
                 row.Sent = true;
                 inboxBox.AttachMenu(row, seq, audioId, true, "");
+                // A transcrição pode chegar DEPOIS do envio: registra o alvo,
+                // aproveita o que a transcrição ao vivo já produziu e transcreve
+                // o áudio inteiro — o menu do botão direito mostra o texto
+                // quando ele chegar, mesmo sem o usuário saber.
+                audioTranscriptionId = audioId;
+                audioTranscriptionSeq = seq;
+                TranscriptionCache.RegisterTarget(audioId, seq, row);
+                string transcritoAgora = LiveTranscriptionText();
+                if (transcritoAgora.Length > 0)
+                {
+                    TranscriptionCache.Store(audioId, seq, transcritoAgora);
+                }
+                StartInboxTranscription(row);
             }
         }
 
@@ -4500,6 +4542,8 @@ namespace TailMsg
                     Address = e.RemoteAddress,
                     Size = imageSize,
                     FileName = imageFile,
+                    // Nome original do arquivo (o menu e o "salvar como" usam).
+                    Text = ehArquivo ? (e.FileName ?? "") : "",
                     OperationId = e.OperationId
                 });
                 InboxImageRow receivedImageRow = inboxBox.AppendImage(
@@ -4698,6 +4742,7 @@ namespace TailMsg
                 });
                 audioRow.Seq = audioSeq;
                 inboxBox.AttachMenu(audioRow, audioSeq, e.OperationId, false, "");
+                TranscriptionCache.RegisterTarget(e.OperationId, audioSeq, audioRow);
                 StartInboxTranscription(audioRow);
 
                 ReceivedMessageForm notification = new ReceivedMessageForm(
@@ -4737,13 +4782,13 @@ namespace TailMsg
             string cached;
             if (TranscriptionCache.TryGet(operationId, out cached))
             {
-                row.SetTranscription(cached);
-                HistoryStore.UpdateTranscription(row.HistorySeq, cached);
+                TranscriptionCache.Store(operationId, row.Seq, cached);
                 return;
             }
 
             byte[] audioBytes = row.Audio == null ? null : row.Audio.WavBytes;
             if (audioBytes == null || audioBytes.Length == 0) return;
+            long seq = row.Seq;
 
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -4755,13 +4800,10 @@ namespace TailMsg
                     operationId,
                     out text,
                     out error);
-                if (!ok) return;
-                TranscriptionCache.Remember(operationId, text);
-                TryBeginInvoke(delegate
-                {
-                    row.SetTranscription(text);
-                    HistoryStore.UpdateTranscription(row.HistorySeq, text);
-                });
+                if (!ok || String.IsNullOrEmpty(text)) return;
+                // Grava no arquivo e no menu mesmo que a janela que pediu já
+                // tenha fechado (o Store não depende da interface).
+                TranscriptionCache.Store(operationId, seq, text);
             });
         }
 
@@ -4896,6 +4938,8 @@ namespace TailMsg
 
                 for (int index = first; index < entries.Count; index++)
                 {
+                    // Divisória de data (como no WhatsApp) quando o dia muda.
+                    inboxBox.GarantirDivisaoDeData(TicksToLocalTime(entries[index].Seq));
                     AppendHistoryEntry(entries[index]);
                 }
             }
@@ -4948,7 +4992,9 @@ namespace TailMsg
                     exists ? File.ReadAllBytes(path) : null,
                     exists ? path : null,
                     isFile,
-                    isFile ? entry.FileName : "");
+                    isFile
+                        ? (String.IsNullOrEmpty(entry.Text) ? entry.FileName : entry.Text)
+                        : "");
                 row.Address = entry.Address;
                 row.Seq = entry.Seq;
                 row.OperationId = entry.OperationId;
@@ -4976,6 +5022,9 @@ namespace TailMsg
             audioRow.Sent = sent;
             if (!String.IsNullOrEmpty(entry.Text)) audioRow.SetTranscription(entry.Text);
             inboxBox.AttachMenu(audioRow, entry.Seq, entry.OperationId, sent, entry.Text);
+            // Guarda o alvo para transcrições que ainda cheguem (ex.: a
+            // janelinha fechou antes de o serviço responder).
+            TranscriptionCache.RegisterTarget(entry.OperationId, entry.Seq, audioRow);
         }
 
         private void RepositionNotifications()
@@ -5097,6 +5146,8 @@ namespace TailMsg
         private string replyCommittedText = "";
         private string replyDraftText = "";
         private int replyCommitOffset;
+        // Áudio de resposta já enviado cuja transcrição ainda pode chegar.
+        private long replyAudioSentSeq;
         private int replyLastDraftBytes;
         private int replyGeneration;
         private bool replyCommitBusy;
@@ -5925,6 +5976,13 @@ namespace TailMsg
                     out text,
                     out error);
 
+                if (ok && !String.IsNullOrEmpty(text))
+                {
+                    // Grava no histórico mesmo que a janelinha já tenha sido
+                    // fechada (o usuário pode responder/fechar antes de a
+                    // transcrição chegar).
+                    TranscriptionCache.Store(audioMessage.OperationId, 0, text);
+                }
                 if (IsDisposed || !IsHandleCreated) return;
                 try
                 {
@@ -6098,6 +6156,7 @@ namespace TailMsg
             replyCommittedText = "";
             replyDraftText = "";
             replyCommitOffset = 0;
+            replyAudioSentSeq = 0;
             replyLastDraftBytes = 0;
             replyGeneration++;
             replyCommitBusy = false;
@@ -6272,6 +6331,14 @@ namespace TailMsg
                     operationId,
                     out text,
                     out error);
+                if (ok && commit && replyAudioSentSeq != 0 && !String.IsNullOrEmpty(text))
+                {
+                    // O áudio já foi enviado e o trecho confirmado chegou:
+                    // grava direto no histórico (a janelinha pode estar
+                    // fechando).
+                    TranscriptionCache.Store("", replyAudioSentSeq,
+                        AppendReplyText(replyCommittedText, text));
+                }
                 if (IsDisposed || !IsHandleCreated) return;
                 try
                 {
@@ -6691,6 +6758,9 @@ namespace TailMsg
                             Address = peer.Address,
                             Size = replyFileBytes.Length,
                             FileName = arquivoSalvo,
+                            // Nome original do arquivo (o menu e o "salvar
+                            // como" usam depois de recarregar).
+                            Text = replyFileName ?? "",
                             OperationId = ""
                         });
                         MainForm.NotifyHistoryChanged();
@@ -6712,7 +6782,7 @@ namespace TailMsg
                         // histórico (o painel o reexibe ao recarregar).
                         string arquivoAudio = HistoryStore.SaveMedia(
                             replyAudioPayload.WavBytes, ".wav");
-                        HistoryStore.Append(new HistoryEntry
+                        long audioSeq = HistoryStore.Append(new HistoryEntry
                         {
                             Kind = "sent-audio",
                             Time = DateTime.Now.ToString("HH:mm"),
@@ -6722,6 +6792,15 @@ namespace TailMsg
                             FileName = arquivoAudio,
                             OperationId = ""
                         });
+                        // O que a transcrição ao vivo já produziu vale desde
+                        // já; o restante chega pelo Store do worker mesmo com
+                        // esta janelinha fechando.
+                        replyAudioSentSeq = audioSeq;
+                        string transcritoAgora = ReplyTranscriptionText();
+                        if (transcritoAgora.Length > 0)
+                        {
+                            TranscriptionCache.Store("", audioSeq, transcritoAgora);
+                        }
                         MainForm.NotifyHistoryChanged();
                     }
                 }
@@ -6854,6 +6933,73 @@ namespace TailMsg
             lock (Sync)
             {
                 return Entries.TryGetValue(operationId, out text);
+            }
+        }
+
+        // Áudio do histórico cuja transcrição ainda pode chegar: a operação
+        // aponta para o seq do arquivo e o seq aponta para a linha viva (menu).
+        private static readonly Dictionary<string, long> SeqsByOperation =
+            new Dictionary<string, long>(StringComparer.Ordinal);
+        private static readonly Dictionary<long, WeakReference> RowsBySeq =
+            new Dictionary<long, WeakReference>();
+
+        public static void RegisterTarget(string operationId, long seq, InboxAudioRow row)
+        {
+            if (seq == 0 && String.IsNullOrEmpty(operationId)) return;
+            lock (Sync)
+            {
+                if (seq != 0 && !String.IsNullOrEmpty(operationId))
+                {
+                    SeqsByOperation[operationId] = seq;
+                }
+                if (seq != 0)
+                {
+                    RowsBySeq[seq] = row == null ? null : new WeakReference(row);
+                }
+            }
+        }
+
+        // Guarda a transcrição que chegou DEPOIS do envio/fechamento: memória,
+        // arquivo do histórico (por seq) e menu da linha, quando ela ainda
+        // existe. Não depende de quem pediu: pode ser chamado de qualquer
+        // thread e continua valendo com as janelas fechadas.
+        public static void Store(string operationId, long seq, string text)
+        {
+            if (String.IsNullOrEmpty(text)) return;
+            Remember(operationId, text);
+
+            long alvo = seq;
+            InboxAudioRow row = null;
+            lock (Sync)
+            {
+                if (alvo == 0 && !String.IsNullOrEmpty(operationId))
+                {
+                    SeqsByOperation.TryGetValue(operationId, out alvo);
+                }
+                if (alvo != 0)
+                {
+                    WeakReference referencia;
+                    if (RowsBySeq.TryGetValue(alvo, out referencia) &&
+                        referencia != null && referencia.IsAlive)
+                    {
+                        row = referencia.Target as InboxAudioRow;
+                    }
+                }
+            }
+
+            if (alvo != 0)
+            {
+                HistoryStore.UpdateTranscription(alvo, text);
+            }
+            if (row == null || row.IsDisposed) return;
+            MethodInvoker apply = delegate { row.SetTranscription(text); };
+            try
+            {
+                if (row.InvokeRequired) row.BeginInvoke(apply);
+                else apply();
+            }
+            catch (InvalidOperationException)
+            {
             }
         }
     }

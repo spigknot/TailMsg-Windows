@@ -1814,10 +1814,16 @@ namespace TailMsg
         private readonly Panel content;
         private readonly ContextMenuStrip sharedMenu;
         private readonly ToolStripMenuItem menuTranscription;
+        private readonly ToolStripMenuItem menuCopy;
+        private readonly ToolStripMenuItem menuSaveAs;
         private readonly ToolStripMenuItem menuDelete;
         private readonly ToolStripMenuItem menuDeleteAll;
+        private readonly Font menuItalicFont;
         private bool layingOut;
         private bool bulkLoad;
+        // Dia da última divisória do histórico ("14/09/2026"): muda de dia,
+        // entra uma linha de data antes das mensagens seguintes.
+        private DateTime ultimaData = DateTime.MinValue;
         // Altura acumulada das linhas: permite acrescentar uma linha nova sem
         // varrer o histórico inteiro (custo constante por mensagem).
         private int lastBottom;
@@ -1898,15 +1904,24 @@ namespace TailMsg
 
             sharedMenu = new ContextMenuStrip();
             sharedMenu.Font = rowFont;
+            menuItalicFont = new Font(rowFont, FontStyle.Italic);
             menuTranscription = new ToolStripMenuItem("");
-            menuTranscription.Font = new Font(rowFont, FontStyle.Italic);
+            menuTranscription.Font = menuItalicFont;
             menuTranscription.ForeColor = Color.FromArgb(75, 85, 99);
-            menuTranscription.Enabled = false;
+            menuTranscription.Click += SharedMenuPrimary;
+            menuCopy = new ToolStripMenuItem("Copiar");
+            menuCopy.Click += SharedMenuCopy;
+            menuSaveAs = new ToolStripMenuItem("Salvar como");
+            menuSaveAs.Click += SharedMenuSaveAs;
             menuDelete = new ToolStripMenuItem("Deletar");
             menuDelete.Click += SharedMenuDelete;
             menuDeleteAll = new ToolStripMenuItem("Deletar para todos");
             menuDeleteAll.Click += SharedMenuDeleteAll;
+            // Ordem pedida: transcrição/miniatura/nome, Copiar (imagem),
+            // Salvar como, Deletar e Deletar para todos (só enviadas).
             sharedMenu.Items.Add(menuTranscription);
+            sharedMenu.Items.Add(menuCopy);
+            sharedMenu.Items.Add(menuSaveAs);
             sharedMenu.Items.Add(new ToolStripSeparator());
             sharedMenu.Items.Add(menuDelete);
             sharedMenu.Items.Add(menuDeleteAll);
@@ -1971,6 +1986,26 @@ namespace TailMsg
             AddRow(more);
         }
 
+        // Divisória de data (igual à do WhatsApp): antes da primeira mensagem
+        // de cada dia entra uma linha com a data; as mensagens seguem normais.
+        public void GarantirDivisaoDeData(DateTime data)
+        {
+            if (content == null) return;
+            DateTime dia = data.Date;
+            if (dia == ultimaData) return;
+            ultimaData = dia;
+
+            Label separador = new Label();
+            separador.Text = dia.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
+            separador.TextAlign = ContentAlignment.MiddleCenter;
+            separador.AutoSize = false;
+            separador.Font = rowFont;
+            separador.ForeColor = Color.FromArgb(107, 114, 128);
+            separador.BackColor = Color.FromArgb(243, 244, 246);
+            separador.Height = 26;
+            AddRow(separador);
+        }
+
         // Texto do histórico: recebida alinhada à esquerda, enviada à direita.
         public InboxTextRow AppendMessage(
             string who,
@@ -1980,6 +2015,8 @@ namespace TailMsg
             long seq,
             string operationId)
         {
+            // Mensagem ao vivo: garante a divisória do dia antes dela.
+            if (!bulkLoad) GarantirDivisaoDeData(DateTime.Now);
             InboxTextRow row = new InboxTextRow(who, text, time, sent, rowFont);
             row.Seq = seq;
             row.OperationId = operationId;
@@ -2015,6 +2052,8 @@ namespace TailMsg
             bool asFile = false,
             string fileName = "")
         {
+            // Imagem/arquivo ao vivo: garante a divisória do dia antes dela.
+            if (!bulkLoad) GarantirDivisaoDeData(DateTime.Now);
             InboxImageRow row = asFile
                 ? new InboxImageRow(who, body, imageBytes, filePath, PlayerSize, rowFont, true, fileName)
                 : new InboxImageRow(who, body, imageBytes, filePath, PlayerSize, rowFont);
@@ -2030,6 +2069,8 @@ namespace TailMsg
             AudioPayload audio,
             string operationId)
         {
+            // Áudio ao vivo: garante a divisória do dia antes dele.
+            if (!bulkLoad) GarantirDivisaoDeData(DateTime.Now);
             InboxAudioRow row = new InboxAudioRow(who, body, audio, operationId, PlayerSize, rowFont);
             row.SetRowTime(time);
             row.PlayRequested += delegate(object sender, EventArgs e)
@@ -2062,7 +2103,19 @@ namespace TailMsg
             baseRow.OperationId = operationId;
             baseRow.Sent = sent;
             baseRow.TranscriptionText = transcription;
-            row.ContextMenuStrip = sharedMenu;
+            AtribuirMenu(baseRow, sharedMenu);
+        }
+
+        // O menu também precisa abrir ao clicar com o botão direito NOS FILHOS
+        // (o ícone de play/imagem, os textos): controles filhos não herdam o
+        // menu do painel, então cada um recebe o mesmo menu compartilhado.
+        private static void AtribuirMenu(Control pai, ContextMenuStrip menu)
+        {
+            pai.ContextMenuStrip = menu;
+            foreach (Control filho in pai.Controls)
+            {
+                AtribuirMenu(filho, menu);
+            }
         }
 
         private InboxRowBase RowUnderMenu()
@@ -2081,9 +2134,39 @@ namespace TailMsg
         {
             InboxRowBase linha = RowUnderMenu();
             if (linha == null) return;
-            bool temTranscricao = !linha.Sent && !String.IsNullOrEmpty(linha.TranscriptionText);
-            menuTranscription.Visible = temTranscricao;
-            menuTranscription.Text = temTranscricao ? "\"" + linha.TranscriptionText + "\"" : "";
+
+            // Primeiro item: transcrição (áudio), miniatura (imagem) ou nome do
+            // arquivo (clipe). Vale para recebidas E enviadas.
+            Image miniatura = linha.MenuThumbnail;
+            string principal = linha.MenuPrimaryText;
+            bool temItem = miniatura != null || !String.IsNullOrEmpty(principal);
+            menuTranscription.Visible = temItem;
+            if (temItem)
+            {
+                menuTranscription.Image = miniatura;
+                menuTranscription.ImageScaling = ToolStripItemImageScaling.SizeToFit;
+                if (miniatura != null)
+                {
+                    menuTranscription.Text = "";
+                    menuTranscription.Font = sharedMenu.Font;
+                }
+                else
+                {
+                    bool audio = linha is InboxAudioRow;
+                    menuTranscription.Font = audio ? menuItalicFont : sharedMenu.Font;
+                    menuTranscription.Text = audio ? "\"" + principal + "\"" : principal;
+                }
+                menuTranscription.Enabled = true;
+            }
+            else
+            {
+                menuTranscription.Image = null;
+                menuTranscription.Text = "";
+                menuTranscription.Enabled = false;
+            }
+
+            menuCopy.Visible = linha.CanCopyImage;
+            menuSaveAs.Visible = linha.CanSaveAs;
             menuDeleteAll.Visible = linha.Sent && !String.IsNullOrEmpty(linha.OperationId);
         }
 
@@ -2099,6 +2182,31 @@ namespace TailMsg
             InboxRowBase linha = RowUnderMenu();
             if (linha == null) return;
             RaiseDelete(linha.Seq, linha.OperationId, linha.Address, true);
+        }
+
+        // Clique no primeiro item: copia a transcrição (áudio) ou abre a
+        // imagem/arquivo no aplicativo padrão do sistema.
+        private void SharedMenuPrimary(object sender, EventArgs e)
+        {
+            InboxRowBase linha = RowUnderMenu();
+            if (linha == null) return;
+            linha.MenuPrimaryAction();
+        }
+
+        // Copiar (só quando a célula tem imagem anexa): vai para a área de
+        // transferência, pronta para colar no Word, Paint etc.
+        private void SharedMenuCopy(object sender, EventArgs e)
+        {
+            InboxRowBase linha = RowUnderMenu();
+            if (linha == null) return;
+            linha.CopyImage();
+        }
+
+        private void SharedMenuSaveAs(object sender, EventArgs e)
+        {
+            InboxRowBase linha = RowUnderMenu();
+            if (linha == null) return;
+            linha.SaveAs();
         }
 
         private void RaiseDelete(long seq, string operationId, string address, bool forEveryone)
@@ -2165,6 +2273,8 @@ namespace TailMsg
         public void Clear()
         {
             if (content == null) return;
+            // Ao limpar, a próxima carga insere as divisórias de data de novo.
+            ultimaData = DateTime.MinValue;
             if (activeRow != null)
             {
                 activeRow.StopPlayback();
@@ -2556,6 +2666,17 @@ namespace TailMsg
         }
 
         public string TranscriptionText { get; set; }
+
+        // ---- Ações do menu do botão direito ---------------------------------
+        // Cada linha responde pelo que o menu mostra (transcrição do áudio,
+        // miniatura da imagem ou nome do arquivo) e pelas ações do menu.
+        public virtual string MenuPrimaryText { get { return ""; } }
+        public virtual Image MenuThumbnail { get { return null; } }
+        public virtual void MenuPrimaryAction() { }
+        public virtual bool CanCopyImage { get { return false; } }
+        public virtual void CopyImage() { }
+        public virtual bool CanSaveAs { get { return false; } }
+        public virtual void SaveAs() { }
     }
 
 
@@ -2774,6 +2895,7 @@ namespace TailMsg
         private readonly Label whoLabel;
         private readonly Label bodyLabel;
         private readonly IconButton openButton;
+        private Image menuThumbnail;
 
         private bool layingOutRow;
         private string lastSig = "";
@@ -2831,18 +2953,10 @@ namespace TailMsg
             openButton.Size = new Size(iconSize, iconSize);
             openButton.Location = new Point(0, 0);
             openButton.Enabled = HasImage();
-            openButton.AccessibleName = asFile ? "Salvar arquivo" : "Abrir imagem";
-            openButton.Click += delegate
-            {
-                if (asFile)
-                {
-                    SaveFileAs();
-                }
-                else
-                {
-                    OpenImage();
-                }
-            };
+            openButton.AccessibleName = asFile ? "Abrir arquivo" : "Abrir imagem";
+            // Clique no ícone abre no aplicativo padrão; salvar continua no
+            // menu do botão direito ("Salvar como").
+            openButton.Click += delegate { OpenImage(); };
             ContentCell.Controls.Add(openButton);
 
             MontarConteudo();
@@ -3021,6 +3135,87 @@ namespace TailMsg
             }
         }
 
+        // ---- Ações do menu do botão direito (imagem/arquivo) ---------------
+
+        public override string MenuPrimaryText
+        {
+            get
+            {
+                if (!asFile) return "";
+                return String.IsNullOrEmpty(fileName)
+                    ? Path.GetFileName(filePath)
+                    : fileName;
+            }
+        }
+
+        public override Image MenuThumbnail
+        {
+            get
+            {
+                if (asFile || imageBytes == null || imageBytes.Length == 0) return null;
+                if (menuThumbnail == null)
+                {
+                    string error;
+                    menuThumbnail = ImageTransfer.CreateThumbnail(imageBytes, 112, 112, out error);
+                }
+                return menuThumbnail;
+            }
+        }
+
+        // Clique no item principal (miniatura ou nome do arquivo): abre no
+        // aplicativo padrão do sistema.
+        public override void MenuPrimaryAction()
+        {
+            OpenImage();
+        }
+
+        public override bool CanCopyImage
+        {
+            get { return !asFile && imageBytes != null && imageBytes.Length > 0; }
+        }
+
+        public override void CopyImage()
+        {
+            string error;
+            if (ImageTransfer.TryCopyToClipboard(imageBytes, out error)) return;
+            MessageBox.Show(this, "Não foi possível copiar a imagem: " + error,
+                "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        public override bool CanSaveAs
+        {
+            get { return imageBytes != null && imageBytes.Length > 0; }
+        }
+
+        public override void SaveAs()
+        {
+            if (asFile)
+            {
+                // Arquivo: o diálogo já sugere o nome original.
+                SaveFileAs();
+                return;
+            }
+            if (imageBytes == null || imageBytes.Length == 0) return;
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "Salvar como";
+                dialog.FileName = "imagem.png";
+                dialog.Filter = "Imagem PNG|*.png|Todos os arquivos|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    File.WriteAllBytes(dialog.FileName, imageBytes);
+                    MessageBox.Show(this, "Imagem salva em " + dialog.FileName,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível salvar: " + error.Message,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+        }
+
         private void OpenImage()
         {
             // Imagem do histórico persistente: o arquivo já está em disco.
@@ -3077,7 +3272,12 @@ namespace TailMsg
             {
                 string directory = Path.Combine(Path.GetTempPath(), "TailMsg");
                 Directory.CreateDirectory(directory);
-                string fileName = "imagem-" + ShortHash(imageBytes) + ".png";
+                string fileName = asFile
+                    ? "midia-" + ShortHash(imageBytes) + "-" +
+                        (String.IsNullOrEmpty(this.fileName)
+                            ? "arquivo"
+                            : Path.GetFileName(this.fileName))
+                    : "imagem-" + ShortHash(imageBytes) + ".png";
                 string fullPath = Path.Combine(directory, fileName);
                 if (!File.Exists(fullPath))
                 {
@@ -3221,6 +3421,56 @@ namespace TailMsg
         public void SetTranscription(string text)
         {
             Transcription = text ?? "";
+            // O menu de contexto lê TranscriptionText (da base): mantém os dois
+            // em sincronia para a transcrição que chega depois do envio.
+            TranscriptionText = Transcription;
+        }
+
+        // O menu mostra a transcrição; o clique copia o texto.
+        public override string MenuPrimaryText
+        {
+            get { return Transcription; }
+        }
+
+        public override void MenuPrimaryAction()
+        {
+            string texto = Transcription;
+            if (String.IsNullOrEmpty(texto)) return;
+            try
+            {
+                Clipboard.SetText(texto);
+            }
+            catch (Exception)
+            {
+                // Sem área de transferência disponível: nada a fazer.
+            }
+        }
+
+        public override bool CanSaveAs
+        {
+            get { return audio != null && audio.WavBytes != null && audio.WavBytes.Length > 0; }
+        }
+
+        public override void SaveAs()
+        {
+            byte[] bytes = audio == null ? null : audio.WavBytes;
+            if (bytes == null || bytes.Length == 0) return;
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = "Salvar áudio";
+                dialog.FileName = "audio.wav";
+                dialog.Filter = "Áudio WAV|*.wav|Todos os arquivos|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    File.WriteAllBytes(dialog.FileName, bytes);
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível salvar: " + error.Message,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
         }
 
         // Nome em cima; embaixo o play e a duração:

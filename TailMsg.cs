@@ -4772,6 +4772,15 @@ namespace TailMsg
             }
         }
 
+        // Recarrega a caixa do zero: usado depois de limpar o histórico (o
+        // recorte antigo não vale mais e a caixa precisa esvaziar na hora).
+        private void ReloadHistoryFromDisk()
+        {
+            historyFirstShown = 0;
+            inboxBox.Clear();
+            RenderHistory(false);
+        }
+
         private void LoadHistoryIntoInbox()
         {
             // Ao abrir o painel a caixa já aparece no fim da conversa: o
@@ -4794,7 +4803,7 @@ namespace TailMsg
                 if (IsDisposed || !IsHandleCreated) return;
                 try
                 {
-                    BeginInvoke((MethodInvoker)delegate { RenderHistory(false); });
+                    BeginInvoke((MethodInvoker)delegate { ReloadHistoryFromDisk(); });
                 }
                 catch (InvalidOperationException)
                 {
@@ -4808,7 +4817,13 @@ namespace TailMsg
         private void RenderHistory(bool loadMore)
         {
             List<HistoryEntry> entries = HistoryStore.Load();
-            if (entries.Count == 0) return;
+            if (entries.Count == 0)
+            {
+                // Histórico vazio (logo após limpar): a caixa precisa esvaziar.
+                inboxBox.Clear();
+                historyFirstShown = 0;
+                return;
+            }
 
             int first = historyFirstShown;
             if (!loadMore)
@@ -5039,6 +5054,8 @@ namespace TailMsg
         private Label replyLabel;
         private Bitmap replyAttachmentThumbnail;
         private ImagePayload pendingReplyImage;
+        private byte[] replyPendingFileBytes;
+        private string replyPendingFileName;
         private int baseReplyButtonTop;
         private int baseTransparencyButtonTop;
         private int basePopupHeight;
@@ -5566,9 +5583,7 @@ namespace TailMsg
             // Alinhamento final do clipe: roda depois de todos os botões
             // estarem posicionados (o bloco anterior à criação é no-op, porque
             // o clipe ainda não existia) e copia o Top do microfone branco.
-            replyClipButton.Top = replyMicButton.Top;
-            replyClipButton.Left = replyMicButton.Left - 52;
-            replyClipButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            AlignReplyClip();
             replyLiveMicButton.Click += delegate { ToggleReplyLiveMicrophone(); };
             body.Controls.Add(replyLiveMicButton);
 
@@ -5741,7 +5756,7 @@ namespace TailMsg
                     extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
                 if (!ehImagem)
                 {
-                    SendReplyFile(dialog.FileName);
+                    SetReplyAttachmentFile(dialog.FileName);
                     return;
                 }
 
@@ -5767,9 +5782,51 @@ namespace TailMsg
             }
         }
 
+        // Arquivo escolhido no clipe da resposta: fica pendente e só sai no
+        // ENVIAR, com o ícone do clipe no lugar da miniatura.
+        // O clipe fica na mesma linha do microfone branco e à distância que se
+        // vê entre os dois microfones (52 px à esquerda do branco).
+        private void AlignReplyClip()
+        {
+            if (replyClipButton == null || replyMicButton == null) return;
+            replyClipButton.Top = replyMicButton.Top;
+            replyClipButton.Left = replyMicButton.Left - 52;
+        }
+
+        private void SetReplyAttachmentFile(string caminho)
+        {
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(caminho);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Não foi possível ler o arquivo: " + error.Message,
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (bytes.Length == 0)
+            {
+                MessageBox.Show(this, "O arquivo está vazio.",
+                    "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            RefreshReplyCapability();
+            ClearReplyAttachmentThumbnail();
+            replyPendingFileBytes = bytes;
+            replyPendingFileName = Path.GetFileName(caminho);
+            replyAttachmentBox.Image = AppResources.AudioIconClip();
+            replyAttachmentLabel.Text = "Anexo: " + replyPendingFileName + " — " +
+                ImageTransfer.DescribeBytes(bytes.Length);
+            ApplyReplyLayout();
+        }
+
         private void SetReplyAttachment(ImagePayload image)
         {
             RefreshReplyCapability();
+            AlignReplyClip();
             ClearReplyAttachmentThumbnail();
             pendingReplyImage = image;
 
@@ -5800,6 +5857,8 @@ namespace TailMsg
         private void ClearReplyAttachment()
         {
             pendingReplyImage = null;
+            replyPendingFileBytes = null;
+            replyPendingFileName = "";
             ClearReplyAttachmentThumbnail();
             ApplyReplyLayout();
         }
@@ -6320,7 +6379,7 @@ namespace TailMsg
             if (replyBox == null) return;
 
             int top = replyBox.Bottom + 6;
-            if (pendingReplyImage != null)
+            if (pendingReplyImage != null || replyPendingFileBytes != null)
             {
                 replyAttachmentBorder.Location = new Point(5, top);
                 replyAttachmentBorder.Visible = true;
@@ -6358,6 +6417,12 @@ namespace TailMsg
             replyLiveMicButton.BringToFront();
             replyButton.BringToFront();
             transparencyButton.BringToFront();
+
+            // O clipe acompanha a linha dos microfones em qualquer layout: a
+            // faixa de anexo e o player de áudio empurram os botões para baixo,
+            // e sem isto o clipe ficava na altura antiga (sobre o player).
+            AlignReplyClip();
+            if (replyClipButton != null) replyClipButton.BringToFront();
 
             int required = toolsTop + replyButton.Height + 10;
             int height = Math.Max(basePopupHeight, required);
@@ -6487,8 +6552,11 @@ namespace TailMsg
             string reply = replyBoxIsTranscription ? "" : replyBox.Text.Trim();
             ImagePayload attachment = pendingReplyImage;
             AudioPayload replyAudioPayload = replyAudio;
+            byte[] replyFileBytes = replyPendingFileBytes;
+            string replyFileName = replyPendingFileName;
 
-            if (reply.Length == 0 && attachment == null && replyAudioPayload == null)
+            if (reply.Length == 0 && attachment == null && replyAudioPayload == null &&
+                replyFileBytes == null)
             {
                 replyBox.Focus();
                 return;
@@ -6533,6 +6601,7 @@ namespace TailMsg
                 // Texto e imagem viajam separados, como no envio principal.
                 bool sentText = false;
                 bool sentImage = false;
+                bool sentFile = false;
                 string failure = "";
 
                 if (reply.Length > 0)
@@ -6553,6 +6622,40 @@ namespace TailMsg
                         attachment);
                     sentImage = imageResult.Success;
                     if (!imageResult.Success) failure = imageResult.ErrorMessage;
+
+                    if (replyFileBytes != null)
+                    {
+                        MessageSendResult fileResult = MessageSender.SendFile(
+                            peer,
+                            localComputerName,
+                            replyFileName,
+                            replyFileBytes,
+                            null);
+                        sentFile = fileResult.Success;
+                        if (!fileResult.Success && failure.Length == 0)
+                        {
+                            failure = fileResult.ErrorMessage;
+                        }
+                        if (sentFile)
+                        {
+                            // O arquivo enviado por esta janelinha persiste no
+                            // histórico (o painel o reexibe ao recarregar).
+                            string arquivoSalvo = HistoryStore.SaveMedia(
+                                replyFileBytes,
+                                Path.GetExtension(replyFileName));
+                            HistoryStore.Append(new HistoryEntry
+                            {
+                                Kind = "sent-file",
+                                Time = DateTime.Now.ToString("HH:mm"),
+                                Sender = peer.Name,
+                                Address = peer.Address,
+                                Size = replyFileBytes.Length,
+                                FileName = arquivoSalvo,
+                                OperationId = ""
+                            });
+                            MainForm.NotifyHistoryChanged();
+                        }
+                    }
                 }
 
                 bool sentAudio = false;
@@ -6591,7 +6694,7 @@ namespace TailMsg
                     {
                         replyButton.Enabled = true;
                         if (sentText) replyBox.Clear();
-                        if (sentImage) ClearReplyAttachment();
+                        if (sentImage || sentFile) ClearReplyAttachment();
                         if (sentAudio)
                         {
                             ClearReplyAudio();

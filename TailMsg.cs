@@ -5584,6 +5584,8 @@ namespace TailMsg
             // estarem posicionados (o bloco anterior à criação é no-op, porque
             // o clipe ainda não existia) e copia o Top do microfone branco.
             AlignReplyClip();
+            // Qualquer mudanca de tamanho refaz o alinhamento do clipe.
+            Resize += delegate { AlignReplyClip(); };
             replyLiveMicButton.Click += delegate { ToggleReplyLiveMicrophone(); };
             body.Controls.Add(replyLiveMicButton);
 
@@ -6421,7 +6423,6 @@ namespace TailMsg
             // O clipe acompanha a linha dos microfones em qualquer layout: a
             // faixa de anexo e o player de áudio empurram os botões para baixo,
             // e sem isto o clipe ficava na altura antiga (sobre o player).
-            AlignReplyClip();
             if (replyClipButton != null) replyClipButton.BringToFront();
 
             int required = toolsTop + replyButton.Height + 10;
@@ -6430,6 +6431,11 @@ namespace TailMsg
             {
                 ClientSize = new Size(ClientSize.Width, height);
             }
+
+            // Por ultimo: o redimensionamento acima dispara layout nos controles
+            // ancorados, entao o clipe e alinhado ao microfone branco so depois
+            // dele (a faixa de anexo e o player mudam o toolsTop).
+            AlignReplyClip();
         }
 
         internal void SetNotificationLocation(Point location)

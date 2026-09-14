@@ -1919,6 +1919,11 @@ namespace TailMsg
         {
             get
             {
+                // Mesma fonte do LayoutRows (área de recorte): se as duas
+                // contas divergirem, a linha recém-chegada fica com largura
+                // diferente das demais até o próximo layout completo.
+                if (clip != null && clip.ClientSize.Width > 40)
+                    return Math.Max(120, clip.ClientSize.Width);
                 int width = viewport == null ? ClientSize.Width : viewport.ClientSize.Width;
                 return Math.Max(120, width - 20);
             }
@@ -2002,25 +2007,31 @@ namespace TailMsg
         }
 
         public InboxImageRow AppendImage(
-            string prefix,
+            string who,
+            string body,
+            string time,
             byte[] imageBytes,
             string filePath,
             bool asFile = false,
             string fileName = "")
         {
             InboxImageRow row = asFile
-                ? new InboxImageRow(prefix, imageBytes, filePath, PlayerSize, rowFont, true, fileName)
-                : new InboxImageRow(prefix, imageBytes, filePath, PlayerSize, rowFont);
+                ? new InboxImageRow(who, body, imageBytes, filePath, PlayerSize, rowFont, true, fileName)
+                : new InboxImageRow(who, body, imageBytes, filePath, PlayerSize, rowFont);
+            row.SetRowTime(time);
             AddRow(row);
             return row;
         }
 
         public InboxAudioRow AppendAudio(
-            string prefix,
+            string who,
+            string body,
+            string time,
             AudioPayload audio,
             string operationId)
         {
-            InboxAudioRow row = new InboxAudioRow(prefix, audio, operationId, PlayerSize, rowFont);
+            InboxAudioRow row = new InboxAudioRow(who, body, audio, operationId, PlayerSize, rowFont);
+            row.SetRowTime(time);
             row.PlayRequested += delegate(object sender, EventArgs e)
             {
                 InboxAudioRow requested = sender as InboxAudioRow;
@@ -2189,6 +2200,7 @@ namespace TailMsg
 
             // Caminho rápido: a linha nova vai no fim e só ela é posicionada.
             // O layout completo fica para quando a largura muda ou algo sai.
+            row.PerformLayout();   // grade já no tamanho final (senão fica defasada)
             row.Location = new Point(0, lastBottom);
             lastBottom += row.Height + 2;
             content.Height = Math.Max(0, lastBottom);
@@ -2268,6 +2280,11 @@ namespace TailMsg
         {
             if (layingOut || viewport == null || clip == null || content == null || scrollBar == null) return;
             layingOut = true;
+            // Guarda se a vista já estava no fim: depois do layout ela volta ao
+            // fim — sem isso maximizar/restaurar largava a rolagem no meio do
+            // histórico, mesmo com as linhas idênticas.
+            bool estavaNoFundo = scrollBar.Value >=
+                Math.Max(0, scrollBar.Maximum - scrollBar.LargeChange + 1);
             // Sem o SuspendLayout, cada alteração de largura/posição dispara um
             // relayout completo do container: com o histórico cheio isso virava
             // O(n²) e custava SEGUNDOS por mensagem (medido: 5,9 s).
@@ -2293,8 +2310,12 @@ namespace TailMsg
                         // Só escreve quando o valor muda: cada escrita dispara
                         // trabalho de layout/repintura no WinForms.
                         if (control.Width != width) control.Width = width;
-                        InboxTextRow textRow = control as InboxTextRow;
-                        if (textRow != null) textRow.LayoutRow();
+                        InboxRowBase baseRow = control as InboxRowBase;
+                        if (baseRow != null)
+                        {
+                            baseRow.AjustarGrade();
+                            baseRow.LayoutRow();
+                        }
                         if (control.Top != top || control.Left != 0)
                         {
                             control.Location = new Point(0, top);
@@ -2321,11 +2342,17 @@ namespace TailMsg
                     break;
                 }
                 ApplyScroll();
+                // Se a vista já estava no fim, continua no fim depois do layout
+                // (maximizar/restaurar deixa de mexer na posição da rolagem).
+                if (estavaNoFundo) ScrollToBottom();
             }
             finally
             {
-                content.ResumeLayout(false);
-                clip.ResumeLayout(false);
+                // true = executa o layout pendente agora: sem isso a grade e
+                // as células continuavam com o tamanho antigo até um resize da
+                // janela ("maximizar e voltar alinha as mensagens").
+                content.ResumeLayout(true);
+                clip.ResumeLayout(true);
                 layingOut = false;
             }
         }
@@ -2341,101 +2368,399 @@ namespace TailMsg
         public string Address { get; set; }
 
         private bool sent;
+        private string rowTime = "";
 
-        // Definir "enviada" refaz o layout da linha: o Append* desenha antes de
-        // sabermos se ela e enviada, entao o alinhamento a direita e a cor verde
-        // (com o icone a esquerda do texto) precisam ser reaplicados.
+        // Grade da linha: horário recebido | mensagem recebida | mensagem
+        // enviada | horário enviado. O conteúdo da subclasse vive na célula da
+        // sua direção (ContentCell); as células de horário se preenchem uma de
+        // cada vez conforme a direção.
+        protected readonly TableLayoutPanel Grid;
+        protected readonly Panel CellReceived;
+        protected readonly Panel CellSent;
+        protected readonly Label CellTimeReceived;
+        protected readonly Label CellTimeSent;
+
+        protected InboxRowBase()
+        {
+            BackColor = Color.White;
+
+            Grid = new TableLayoutPanel();
+            Grid.ColumnCount = 4;
+            Grid.RowCount = 1;
+            // Sem Dock: os limites da grade são aplicados na mão a cada resize
+            // (ver AjustarGrade). Com Dock=Fill a grade dependia do layout do
+            // WinForms, que às vezes ficava pendente e deixava a grade com a
+            // altura antiga — a "lacuna sem tabela" com o texto cortado.
+            Grid.CellBorderStyle = TableLayoutPanelCellBorderStyle.Single;
+            Grid.Margin = new Padding(0);
+            Grid.Padding = new Padding(0);
+            Grid.BackColor = Color.White;
+            Grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40F));
+            Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            Grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40F));
+
+            CellTimeReceived = NovoRotuloDeHorario();
+            CellReceived = NovaCelula();
+            CellSent = NovaCelula();
+            CellTimeSent = NovoRotuloDeHorario();
+
+            Grid.Controls.Add(CellTimeReceived, 0, 0);
+            Grid.Controls.Add(CellReceived, 1, 0);
+            Grid.Controls.Add(CellSent, 2, 0);
+            Grid.Controls.Add(CellTimeSent, 3, 0);
+
+            Controls.Add(Grid);
+            AjustarGrade();
+            Resize += delegate { AjustarGrade(); LayoutRow(); };
+            // As células só ganham tamanho real quando a grade faz o layout:
+            // refazer o layout quando elas mudam mantém o conteúdo centrado.
+            CellReceived.Resize += delegate { LayoutRow(); };
+            CellSent.Resize += delegate { LayoutRow(); };
+        }
+
+        private static Label NovoRotuloDeHorario()
+        {
+            Label rotulo = new Label();
+            rotulo.Dock = DockStyle.Fill;
+            rotulo.TextAlign = ContentAlignment.MiddleCenter;
+            rotulo.AutoSize = false;
+            rotulo.Font = new Font("Segoe UI", 8.25F);
+            rotulo.ForeColor = Color.FromArgb(75, 85, 99);
+            rotulo.BackColor = Color.White;
+            return rotulo;
+        }
+
+        // Fonte em negrito para o nome do remetente/destinatário: uma única
+        // instância para todas as linhas (Font é um recurso GDI; uma por linha
+        // vazaria handles com o histórico cheio).
+        private static Font boldNameFont;
+        private static string boldNameKey;
+
+        protected static Font Bold(Font font)
+        {
+            string key = font.FontFamily.Name + "|" +
+                font.SizeInPoints.ToString(CultureInfo.InvariantCulture);
+            if (boldNameFont == null || boldNameKey != key)
+            {
+                boldNameFont = new Font(font, FontStyle.Bold);
+                boldNameKey = key;
+            }
+            return boldNameFont;
+        }
+
+        // Mantém a grade colada no tamanho da linha. É o elo que o layout do
+        // WinForms não garantia quando a janela mudava de largura: a grade
+        // ficava com a altura do tamanho anterior, cortava o texto e deixava
+        // a "lacuna sem tabela" até um novo resize. Aqui o ajuste é direto e
+        // síncrono (SetBounds + PerformLayout), sem depender do layout adiado.
+        public void AjustarGrade()
+        {
+            if (Grid == null) return;
+            int largura = Math.Max(1, ClientSize.Width);
+            int altura = Math.Max(1, ClientSize.Height);
+            if (Grid.Left != 0 || Grid.Top != 0 ||
+                Grid.Width != largura || Grid.Height != altura)
+            {
+                Grid.SetBounds(0, 0, largura, altura);
+                Grid.PerformLayout();
+            }
+        }
+
+        // Largura útil do conteúdo dentro da célula: as duas colunas de horário
+        // (40 + 40) e as cinco bordas da grade (5 x 1) são fixas; cada coluna
+        // do meio fica com metade do resto, menos a folga lateral (8). Sai da
+        // própria linha de propósito: o ClientSize da célula fica com o valor
+        // atrasado enquanto o layout da grade está pendente, e era isso que
+        // deixava as linhas desalinhadas até maximizar/restaurar a janela.
+        protected int CellContentWidth
+        {
+            get { return Math.Max(16, (Width - 101) / 2); }
+        }
+
+        // Mede o texto como o PRÓPRIO Label o desenha: GetPreferredSize usa as
+        // mesmas flags do desenho, então quebra inclusive palavras longas sem
+        // espaço — o TextRenderer+WordBreak devolvia essas em linha única
+        // (teste: 494x17 medidos contra 174x72 desenhados) e o texto estourava
+        // a célula. Medir na hora também evita depender do AutoSize, que fica
+        // pendente quando o painel está com SuspendLayout.
+        protected static Size MedirTexto(Label rotulo, int larguraMaxima)
+        {
+            if (rotulo == null) return new Size(4, 12);
+            if (String.IsNullOrEmpty(rotulo.Text)) return new Size(4, rotulo.Font.Height);
+            Size medido = rotulo.GetPreferredSize(
+                new Size(Math.Max(16, larguraMaxima), int.MaxValue));
+            return new Size(medido.Width + 2, Math.Max(rotulo.Font.Height, medido.Height));
+        }
+
+        private static Panel NovaCelula()
+        {
+            Panel celula = new Panel();
+            celula.Dock = DockStyle.Fill;
+            celula.Margin = new Padding(0);
+            celula.BackColor = Color.White;
+            return celula;
+        }
+
+        // Célula onde a subclasse coloca o seu conteúdo (direção atual).
+        protected Panel ContentCell
+        {
+            get { return sent ? CellSent : CellReceived; }
+        }
+
+        public void SetRowTime(string time)
+        {
+            rowTime = time ?? "";
+            ApplyCells();
+        }
+
+        // Cada lado aparece uma única vez: a recebida usa as duas primeiras
+        // colunas; a enviada, as duas últimas.
+        protected void ApplyCells()
+        {
+            CellTimeReceived.Text = sent ? "" : rowTime;
+            CellTimeSent.Text = sent ? rowTime : "";
+        }
+
         public bool Sent
         {
             get { return sent; }
             set
             {
+                bool mudou = sent != value;
                 sent = value;
+                ApplyCells();
+                if (mudou) ReposicionarConteudo();
                 OnSentChanged();
             }
+        }
+
+        private void ReposicionarConteudo()
+        {
+            Panel origem = sent ? CellReceived : CellSent;
+            Panel destino = sent ? CellSent : CellReceived;
+            if (origem.Controls.Count == 0) return;
+            Control[] mover = new Control[origem.Controls.Count];
+            origem.Controls.CopyTo(mover, 0);
+            origem.Controls.Clear();
+            destino.Controls.AddRange(mover);
         }
 
         protected virtual void OnSentChanged()
         {
         }
+
+        public virtual void LayoutRow()
+        {
+        }
+
         public string TranscriptionText { get; set; }
     }
 
-    // Linha de mensagem de texto: recebida à esquerda, enviada à direita.
+
+    // Rótulo que desenha o texto com a SUA própria quebra de linha. O Label
+    // do WinForms mede uma coisa e desenha outra quando o texto é uma palavra
+    // longa sem espaços (medido: desenhava só ~2,5 linhas e escondia o resto).
+    // Aqui medir e desenhar usam o mesmo algoritmo, então o que está na tela
+    // é exatamente o que foi medido — com quebra por caractere quando a
+    // palavra não cabe na largura.
+    internal sealed class WrapLabel : Control
+    {
+        public WrapLabel()
+        {
+            SetStyle(ControlStyles.SupportsTransparentBackColor |
+                ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.UserPaint, true);
+            BackColor = Color.Transparent;
+            TabStop = false;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            List<string> linhas = Quebrar(Text ?? "", Font, Width);
+            int altura = AlturaLinha(Font);
+            int y = 0;
+            foreach (string linha in linhas)
+            {
+                TextRenderer.DrawText(e.Graphics, linha, Font,
+                    new Point(0, y), ForeColor,
+                    TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                y += altura;
+            }
+        }
+
+        // Altura de uma linha de texto como o desenho a usa.
+        public static int AlturaLinha(Font fonte)
+        {
+            return TextRenderer.MeasureText("Xg", fonte).Height + 1;
+        }
+
+        // Mesma quebra do desenho: por palavras e, se a palavra não couber,
+        // por caractere. Devolve as linhas já prontas.
+        public static List<string> Quebrar(string texto, Font fonte, int larguraMaxima)
+        {
+            List<string> linhas = new List<string>();
+            if (String.IsNullOrEmpty(texto)) return linhas;
+            int limite = Math.Max(16, larguraMaxima);
+            string normalizado = texto.Replace("\r\n", "\n").Replace('\r', '\n');
+            foreach (string paragrafo in normalizado.Split('\n'))
+            {
+                string atual = "";
+                foreach (string palavra in paragrafo.Split(' '))
+                {
+                    string tentativa = atual.Length == 0 ? palavra : atual + " " + palavra;
+                    if (TextRenderer.MeasureText(tentativa, fonte).Width <= limite)
+                    {
+                        atual = tentativa;
+                        continue;
+                    }
+                    if (atual.Length > 0)
+                    {
+                        linhas.Add(atual);
+                        atual = "";
+                    }
+                    // Palavra maior que a linha inteira: quebra por caractere.
+                    string pedaco = "";
+                    foreach (char c in palavra)
+                    {
+                        string tentativa2 = pedaco + c;
+                        if (TextRenderer.MeasureText(tentativa2, fonte).Width <= limite)
+                        {
+                            pedaco = tentativa2;
+                        }
+                        else
+                        {
+                            linhas.Add(pedaco);
+                            pedaco = c.ToString();
+                        }
+                    }
+                    atual = pedaco;
+                }
+                linhas.Add(atual);
+            }
+            return linhas;
+        }
+
+        // Tamanho que o desenho precisa (mesmo algoritmo do OnPaint).
+        public static Size Medir(string texto, Font fonte, int larguraMaxima)
+        {
+            if (String.IsNullOrEmpty(texto)) return new Size(4, fonte.Height);
+            List<string> linhas = Quebrar(texto, fonte, larguraMaxima);
+            int largura = 0;
+            foreach (string linha in linhas)
+            {
+                int l = TextRenderer.MeasureText(linha, fonte).Width;
+                if (l > largura) largura = l;
+            }
+            int altura = Math.Max(AlturaLinha(fonte), linhas.Count * AlturaLinha(fonte));
+            return new Size(
+                Math.Min(largura + 2, Math.Max(16, larguraMaxima) + 2), altura);
+        }
+    }
+
+
+    // Linha de mensagem de texto: a célula da direção mostra o nome em
+    // negrito e o conteúdo centralizado — sem o horário, que vive na coluna
+    // própria da tabela.
     internal sealed class InboxTextRow : InboxRowBase
     {
-        private readonly Label label;
+        private readonly Label nameLabel;
+        private readonly WrapLabel messageLabel;
+        private readonly string whoText;
+        private readonly string bodyText;
+
+        private bool layingOutRow;
+        private string lastSig = "";
 
         public InboxTextRow(string who, string text, string time, bool sent, Font font)
         {
-            BackColor = Color.White;
-            label = new Label();
-            label.Font = font;
-            label.AutoSize = true;
-            label.ForeColor = sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
-            label.Text = InboxPanel.FormatLine(who, text, time, sent);
-            Controls.Add(label);
-            Resize += delegate { LayoutRow(); };
+            whoText = who ?? "";
+            bodyText = text ?? "";
+
+            nameLabel = new Label();
+            nameLabel.Font = Bold(font);
+            nameLabel.AutoSize = false;
+            nameLabel.TextAlign = ContentAlignment.MiddleLeft;
+            nameLabel.UseMnemonic = false;
+
+            messageLabel = new WrapLabel();
+            messageLabel.Font = font;
+
+            SetRowTime(time);
+            MontarConteudo();
+            Sent = sent;
+        }
+
+        // Nome em cima (negrito, centralizado) e a mensagem embaixo.
+        private void MontarConteudo()
+        {
+            Panel celula = ContentCell;
+            celula.Controls.Clear();
+            nameLabel.Text = whoText;
+            messageLabel.Text = bodyText;
+            Color cor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
+            nameLabel.ForeColor = cor;
+            messageLabel.ForeColor = cor;
+            celula.Controls.Add(nameLabel);
+            celula.Controls.Add(messageLabel);
+            lastSig = "";
             LayoutRow();
         }
 
         protected override void OnSentChanged()
         {
-            LayoutRow();
+            MontarConteudo();
         }
 
-        public string Text
-        {
-            get { return label.Text; }
-        }
-
-        public void RefreshLayout()
-        {
-            LayoutRow();
-        }
-
-        private bool layingOutRow;
-
-        private int lastAvailable;
-        private string lastText;
-
-        public void LayoutRow()
+        public override void LayoutRow()
         {
             if (layingOutRow) return;
-
-            // A largura vem da própria linha (o layout do histórico já a
-            // definiu), então a enviada encosta na direita da linha.
-            int available = Width > 0
-                ? Width
-                : (Parent == null ? 160 : Parent.ClientSize.Width - 8);
-            available = Math.Max(160, available);
-
-            // Definir MaximumSize num Label com AutoSize obriga o WinForms a
-            // remedir o texto. Com o histórico cheio isso custava SEGUNDOS por
-            // mensagem nova (medido: 5,1 s), porque toda linha era reprocessada
-            // a cada layout. Se largura e texto não mudaram, não há o que fazer.
-            if (available == lastAvailable && label.Text == lastText) return;
+            // Largura útil calculada da própria linha (fórmula da grade), não
+            // do ClientSize da célula, que pode estar defasado.
+            int available = CellContentWidth;
+            string sig = whoText + "|" + bodyText + "|" + (Sent ? "1" : "0") + "|" +
+                available;
+            if (sig == lastSig) return;
 
             layingOutRow = true;
             try
             {
-            label.MaximumSize = new Size(available, 0);
-            int left = Sent ? Math.Max(0, available - label.Width) : 0;
-            label.Location = new Point(left, 0);
-            Width = available;
-            Height = Math.Max(18, label.Height + 2);
-            lastAvailable = available;
-            lastText = label.Text;
+                // Nome em cima, mensagem embaixo, tudo centralizado:
+                //     LUIZ
+                //     Bom dia, Gustavo!
+                Size tamanhoNome = MedirTexto(nameLabel, available);
+                Size tamanhoCorpo = WrapLabel.Medir(
+                    messageLabel.Text, messageLabel.Font, available);
+                nameLabel.Size = tamanhoNome;
+                messageLabel.Size = tamanhoCorpo;
+
+                int folga = 2;
+                int alturaBloco = tamanhoNome.Height + folga + tamanhoCorpo.Height;
+                int topo = 4;
+                nameLabel.Location = new Point(
+                    Math.Max(1, (available - tamanhoNome.Width) / 2), topo);
+                messageLabel.Location = new Point(
+                    Math.Max(1, (available - tamanhoCorpo.Width) / 2),
+                    topo + tamanhoNome.Height + folga);
+
+                int altura = Math.Max(18, alturaBloco + 8);
+                if (Height != altura) Height = altura;
+                lastSig = sig;
             }
             finally
             {
                 layingOutRow = false;
             }
         }
+
+        public new string Text
+        {
+            get { return nameLabel.Text + messageLabel.Text; }
+        }
     }
 
-    // Uma linha de imagem do histórico: prefixo e botão que abre a imagem no
-    // aplicativo padrão do Windows.
+
     internal sealed class InboxImageRow : InboxRowBase
     {
         private static Image imageGlyph;
@@ -2444,21 +2769,29 @@ namespace TailMsg
         // Linha de arquivo: ícone do clipe e clique = salvar como.
         private readonly bool asFile;
         private readonly string fileName;
-        private readonly Label prefixLabel;
+        private readonly string whoText;
+        private readonly string bodyText;
+        private readonly Label whoLabel;
+        private readonly Label bodyLabel;
         private readonly IconButton openButton;
 
+        private bool layingOutRow;
+        private string lastSig = "";
+
         public InboxImageRow(
-            string prefix,
+            string who,
+            string body,
             byte[] imageBytes,
             string filePath,
             int iconSize,
             Font font)
-            : this(prefix, imageBytes, filePath, iconSize, font, false, "")
+            : this(who, body, imageBytes, filePath, iconSize, font, false, "")
         {
         }
 
         public InboxImageRow(
-            string prefix,
+            string who,
+            string body,
             byte[] imageBytes,
             string filePath,
             int iconSize,
@@ -2470,30 +2803,35 @@ namespace TailMsg
             this.filePath = filePath;
             this.asFile = asFile;
             this.fileName = fileName;
-            AutoSize = true;
-            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            whoText = who ?? "";
+            bodyText = body ?? "";
             BackColor = Color.White;
 
-            prefixLabel = new Label();
-            prefixLabel.AutoSize = true;
-            prefixLabel.Font = font;
-            prefixLabel.ForeColor = Color.FromArgb(31, 41, 55);
-            prefixLabel.Text = prefix;
-            prefixLabel.Margin = new Padding(0, 4, 4, 0);
-            Controls.Add(prefixLabel);
+            whoLabel = new Label();
+            whoLabel.Font = Bold(font);
+            whoLabel.AutoSize = false;
+            whoLabel.TextAlign = ContentAlignment.MiddleLeft;
+            whoLabel.UseMnemonic = false;
+            ContentCell.Controls.Add(whoLabel);
+
+            bodyLabel = new Label();
+            bodyLabel.Font = font;
+            bodyLabel.AutoSize = false;
+            bodyLabel.TextAlign = ContentAlignment.MiddleLeft;
+            bodyLabel.UseMnemonic = false;
+            ContentCell.Controls.Add(bodyLabel);
 
             openButton = new IconButton();
             openButton.Glyph = IconGlyph.None;
             openButton.SourceImage = asFile
                 ? AppResources.AudioIconClip()
                 : LoadImageGlyph();
-            if (asFile) openButton.AccessibleName = "Salvar arquivo";
             openButton.CircleColor = Color.White;
             openButton.CircleOutline = Color.FromArgb(196, 202, 210);
             openButton.Size = new Size(iconSize, iconSize);
-            openButton.Location = new Point(prefixLabel.Right + 4, 0);
+            openButton.Location = new Point(0, 0);
             openButton.Enabled = HasImage();
-            openButton.AccessibleName = "Abrir imagem";
+            openButton.AccessibleName = asFile ? "Salvar arquivo" : "Abrir imagem";
             openButton.Click += delegate
             {
                 if (asFile)
@@ -2505,16 +2843,81 @@ namespace TailMsg
                     OpenImage();
                 }
             };
-            Controls.Add(openButton);
+            ContentCell.Controls.Add(openButton);
 
-            Height = Math.Max(iconSize + 2, prefixLabel.Height + 4);
-            Resize += delegate { LayoutRow(); };
-            LayoutRow();
+            MontarConteudo();
         }
 
         protected override void OnSentChanged()
         {
+            MontarConteudo();
+        }
+
+        // Nome em cima; embaixo o ícone (imagem ou clipe) com o tamanho:
+        //     MIRELLA
+        //     [ícone] (50 kb)
+        private void MontarConteudo()
+        {
+            Panel celula = ContentCell;
+            celula.Controls.Clear();
+            whoLabel.Text = whoText;
+            bodyLabel.Text = bodyText;
+            Color cor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
+            whoLabel.ForeColor = cor;
+            bodyLabel.ForeColor = cor;
+            celula.Controls.Add(whoLabel);
+            celula.Controls.Add(bodyLabel);
+            celula.Controls.Add(openButton);
+            lastSig = "";
             LayoutRow();
+        }
+
+        public override void LayoutRow()
+        {
+            if (layingOutRow) return;
+            // Largura útil calculada da própria linha (fórmula da grade), não
+            // do ClientSize da célula, que pode estar defasado.
+            int available = CellContentWidth;
+            string sig = whoText + "|" + bodyText + "|" + (Sent ? "1" : "0") + "|" +
+                available + "|" + openButton.Width;
+            if (sig == lastSig) return;
+
+            layingOutRow = true;
+            try
+            {
+                // Nome em cima; embaixo o ícone e o tamanho, tudo centralizado:
+                //     MIRELLA
+                //     [ícone] (50 kb)
+                Size tamanhoNome = MedirTexto(whoLabel, available);
+                Size tamanhoCorpo = MedirTexto(bodyLabel,
+                    Math.Max(60, available - openButton.Width - 12));
+                whoLabel.Size = tamanhoNome;
+                bodyLabel.Size = tamanhoCorpo;
+
+                int gap = 4;
+                int folga = 2;
+                int larguraLinha2 = openButton.Width + gap + tamanhoCorpo.Width;
+                int alturaLinha2 = Math.Max(openButton.Height, tamanhoCorpo.Height);
+                int alturaBloco = tamanhoNome.Height + folga + alturaLinha2;
+                int topo = 4;
+
+                whoLabel.Location = new Point(
+                    Math.Max(1, (available - tamanhoNome.Width) / 2), topo);
+                int left2 = Math.Max(1, (available - larguraLinha2) / 2);
+                int topo2 = topo + tamanhoNome.Height + folga;
+                openButton.Location = new Point(left2,
+                    topo2 + Math.Max(0, (alturaLinha2 - openButton.Height) / 2));
+                bodyLabel.Location = new Point(left2 + openButton.Width + gap,
+                    topo2 + Math.Max(0, (alturaLinha2 - tamanhoCorpo.Height) / 2));
+
+                int altura = Math.Max(openButton.Height + 6, alturaBloco + 8);
+                if (Height != altura) Height = altura;
+                lastSig = sig;
+            }
+            finally
+            {
+                layingOutRow = false;
+            }
         }
 
         // O ícone vem embutido no executável (assets/imagem.png).
@@ -2532,53 +2935,6 @@ namespace TailMsg
                 }
             }
             return imageGlyph;
-        }
-
-        private bool layingOutRow;
-
-        private void LayoutRow()
-        {
-            if (layingOutRow) return;
-            layingOutRow = true;
-            try
-            {
-                int available = Parent == null ? Width : Parent.ClientSize.Width;
-                available = Math.Max(160, available - 8);
-                prefixLabel.MaximumSize = new Size(Math.Max(80, available - openButton.Width - 12), 0);
-                if (Sent)
-                {
-                    // Enviada: o ícone vem primeiro e o texto depois.
-                    openButton.Location = new Point(0, 0);
-                    prefixLabel.Location = new Point(openButton.Right + 4, prefixLabel.Top);
-                }
-                else
-                {
-                    // Recebida: primeiro o texto, depois o ícone. O texto é
-                    // medido na hora (PreferredWidth), porque o Width do label
-                    // só é atualizado depois do layout.
-                    prefixLabel.Location = new Point(0, 0);
-                    openButton.Location = new Point(
-                        Math.Max(4, prefixLabel.PreferredWidth + 4), 0);
-                }
-                Height = Math.Max(openButton.Height + 2, prefixLabel.Height + 4);
-
-                // Enviada: prefixo verde e o conjunto (ícone + texto) encostado
-                // na direita da linha.
-                prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
-                int total = prefixLabel.Width + 4 + openButton.Width;
-                if (Sent)
-                {
-                    // Enviada: [ícone][texto] encostado na direita.
-                    int esquerda = Math.Max(0, available - total);
-                    openButton.Left = esquerda;
-                    prefixLabel.Left = openButton.Right + 4;
-                }
-
-            }
-            finally
-            {
-                layingOutRow = false;
-            }
         }
 
         // Grava os bytes em um arquivo temporário e entrega ao sistema, que
@@ -2618,6 +2974,53 @@ namespace TailMsg
             }
         }
 
+        // Confere o começo do arquivo: devolve null quando já é PNG (abre
+        // como está) e a extensão certa quando é outro tipo conhecido.
+        private static string DetectarExtensaoForaDoPng(string caminho)
+        {
+            try
+            {
+                byte[] inicio = new byte[8];
+                int lidos;
+                using (System.IO.FileStream stream = System.IO.File.OpenRead(caminho))
+                {
+                    lidos = stream.Read(inicio, 0, inicio.Length);
+                }
+                if (lidos >= 8 && inicio[0] == 0x89 && inicio[1] == 0x50 &&
+                    inicio[2] == 0x4E && inicio[3] == 0x47)
+                {
+                    return null;   // já é PNG
+                }
+                if (lidos >= 4 && inicio[0] == 0x25 && inicio[1] == 0x50 &&
+                    inicio[2] == 0x44 && inicio[3] == 0x46)
+                {
+                    return ".pdf";
+                }
+                if (lidos >= 2 && inicio[0] == 0xFF && inicio[1] == 0xD8)
+                {
+                    return ".jpg";
+                }
+                if (lidos >= 4 && inicio[0] == 0x47 && inicio[1] == 0x49 &&
+                    inicio[2] == 0x46)
+                {
+                    return ".gif";
+                }
+                if (lidos >= 2 && inicio[0] == 0x42 && inicio[1] == 0x4D)
+                {
+                    return ".bmp";
+                }
+                if (lidos >= 4 && inicio[0] == 0x50 && inicio[1] == 0x4B)
+                {
+                    return ".zip";
+                }
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private void OpenImage()
         {
             // Imagem do histórico persistente: o arquivo já está em disco.
@@ -2625,7 +3028,27 @@ namespace TailMsg
             {
                 try
                 {
-                    Process.Start(new ProcessStartInfo(filePath) { UseShellExecute = true });
+                    // Arquivos antigos salvos com a extensão errada (por
+                    // exemplo um PDF com nome ".png") abriam no visualizador
+                    // de imagem e acusavam "corrompida": confere o conteúdo e,
+                    // quando não for PNG, abre uma cópia com a extensão certa
+                    // para o sistema escolher o aplicativo adequado.
+                    string alvo = filePath;
+                    string extensao = DetectarExtensaoForaDoPng(filePath);
+                    if (extensao != null)
+                    {
+                        string directory = Path.Combine(Path.GetTempPath(), "TailMsg");
+                        Directory.CreateDirectory(directory);
+                        string copia = Path.Combine(
+                            directory,
+                            "midia-" + Path.GetFileNameWithoutExtension(filePath) + extensao);
+                        if (!File.Exists(copia))
+                        {
+                            File.Copy(filePath, copia);
+                        }
+                        alvo = copia;
+                    }
+                    Process.Start(new ProcessStartInfo(alvo) { UseShellExecute = true });
                 }
                 catch (Exception error)
                 {
@@ -2688,15 +3111,22 @@ namespace TailMsg
         }
     }
 
+
     // Uma linha de áudio do histórico: prefixo, play/pause e transcrição.
     internal sealed class InboxAudioRow : InboxRowBase
     {
         private readonly AudioPayload audio;
         private readonly IconButton playButton;
-        private readonly Label prefixLabel;
+        private readonly Label whoLabel;
+        private readonly Label bodyLabel;
         private readonly Label transcriptionLabel;
+        private readonly string whoText;
+        private readonly string bodyText;
         private readonly WavePlayer player = new WavePlayer();
         private readonly System.Windows.Forms.Timer ticker;
+
+        private bool layingOutRow;
+        private string lastSig = "";
 
         public event EventHandler PlayRequested;
 
@@ -2722,7 +3152,8 @@ namespace TailMsg
         }
 
         public InboxAudioRow(
-            string prefix,
+            string who,
+            string body,
             AudioPayload payload,
             string operationId,
             int playerSize,
@@ -2730,43 +3161,48 @@ namespace TailMsg
         {
             audio = payload;
             OperationId = operationId;
-            AutoSize = true;
-            AutoSizeMode = AutoSizeMode.GrowAndShrink;
             BackColor = Color.White;
+            whoText = who ?? "";
+            bodyText = body ?? "";
 
             string loadError = "";
             bool loaded = payload != null && payload.WavBytes != null &&
                 player.Load(payload.WavBytes, out loadError);
 
-            prefixLabel = new Label();
-            prefixLabel.AutoSize = true;
-            prefixLabel.Font = font;
-            prefixLabel.ForeColor = Color.FromArgb(31, 41, 55);
-            prefixLabel.Text = prefix;
-            prefixLabel.Margin = new Padding(0, 4, 4, 0);
-            Controls.Add(prefixLabel);
+            whoLabel = new Label();
+            whoLabel.Font = Bold(font);
+            whoLabel.AutoSize = false;
+            whoLabel.TextAlign = ContentAlignment.MiddleLeft;
+            whoLabel.UseMnemonic = false;
+            ContentCell.Controls.Add(whoLabel);
+
+            bodyLabel = new Label();
+            bodyLabel.Font = font;
+            bodyLabel.AutoSize = false;
+            bodyLabel.TextAlign = ContentAlignment.MiddleLeft;
+            bodyLabel.UseMnemonic = false;
+            ContentCell.Controls.Add(bodyLabel);
 
             playButton = new IconButton();
             playButton.CircleColor = Color.FromArgb(242, 207, 55);
             playButton.CircleOutline = Color.FromArgb(196, 157, 0);
             playButton.Glyph = IconGlyph.Play;
             playButton.Size = new Size(playerSize, playerSize);
-            playButton.Location = new Point(prefixLabel.Right + 2, 0);
+            playButton.Location = new Point(0, 0);
             playButton.Enabled = loaded;
             playButton.AccessibleName = "Reproduzir áudio";
             playButton.Click += delegate { Toggle(); };
-            Controls.Add(playButton);
+            ContentCell.Controls.Add(playButton);
 
             transcriptionLabel = new Label();
-            transcriptionLabel.AutoSize = true;
+            transcriptionLabel.AutoSize = false;
             transcriptionLabel.Font = font;
             transcriptionLabel.ForeColor = Color.FromArgb(75, 85, 99);
             transcriptionLabel.Text = "";
-            Controls.Add(transcriptionLabel);
+            transcriptionLabel.Size = new Size(1, 1);
+            ContentCell.Controls.Add(transcriptionLabel);
 
-            Height = Math.Max(playerSize + 2, prefixLabel.Height + 4);
-            Resize += delegate { LayoutRow(); };
-            LayoutRow();
+            MontarConteudo();
 
             ticker = new System.Windows.Forms.Timer();
             ticker.Interval = 150;
@@ -2785,6 +3221,80 @@ namespace TailMsg
         public void SetTranscription(string text)
         {
             Transcription = text ?? "";
+        }
+
+        // Nome em cima; embaixo o play e a duração:
+        //     DELEGADO
+        //     [play] (13s)
+        private void MontarConteudo()
+        {
+            Panel celula = ContentCell;
+            celula.Controls.Clear();
+            whoLabel.Text = whoText;
+            bodyLabel.Text = bodyText;
+            Color cor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
+            whoLabel.ForeColor = cor;
+            bodyLabel.ForeColor = cor;
+            celula.Controls.Add(whoLabel);
+            celula.Controls.Add(bodyLabel);
+            celula.Controls.Add(playButton);
+            celula.Controls.Add(transcriptionLabel);
+            transcriptionLabel.Location = new Point(0, 0);
+            lastSig = "";
+            LayoutRow();
+        }
+
+        protected override void OnSentChanged()
+        {
+            MontarConteudo();
+        }
+
+        public override void LayoutRow()
+        {
+            if (layingOutRow) return;
+            // Largura útil calculada da própria linha (fórmula da grade), não
+            // do ClientSize da célula, que pode estar defasado.
+            int available = CellContentWidth;
+            string sig = whoText + "|" + bodyText + "|" + (Sent ? "1" : "0") + "|" +
+                available + "|" + playButton.Width;
+            if (sig == lastSig) return;
+
+            layingOutRow = true;
+            try
+            {
+                // Nome em cima; embaixo o play e a duração, tudo centralizado:
+                //     DELEGADO
+                //     [play] (13s)
+                Size tamanhoNome = MedirTexto(whoLabel, available);
+                Size tamanhoCorpo = MedirTexto(bodyLabel,
+                    Math.Max(60, available - playButton.Width - 12));
+                whoLabel.Size = tamanhoNome;
+                bodyLabel.Size = tamanhoCorpo;
+
+                int gap = 4;
+                int folga = 2;
+                int larguraLinha2 = playButton.Width + gap + tamanhoCorpo.Width;
+                int alturaLinha2 = Math.Max(playButton.Height, tamanhoCorpo.Height);
+                int alturaBloco = tamanhoNome.Height + folga + alturaLinha2;
+                int topo = 4;
+
+                whoLabel.Location = new Point(
+                    Math.Max(1, (available - tamanhoNome.Width) / 2), topo);
+                int left2 = Math.Max(1, (available - larguraLinha2) / 2);
+                int topo2 = topo + tamanhoNome.Height + folga;
+                playButton.Location = new Point(left2,
+                    topo2 + Math.Max(0, (alturaLinha2 - playButton.Height) / 2));
+                bodyLabel.Location = new Point(left2 + playButton.Width + gap,
+                    topo2 + Math.Max(0, (alturaLinha2 - tamanhoCorpo.Height) / 2));
+
+                int altura = Math.Max(playButton.Height + 6, alturaBloco + 8);
+                if (Height != altura) Height = altura;
+                lastSig = sig;
+            }
+            finally
+            {
+                layingOutRow = false;
+            }
         }
 
         public void StopPlayback()
@@ -2847,63 +3357,8 @@ namespace TailMsg
             playButton.AccessibleName = player.IsPlaying ? "Pausar áudio" : "Reproduzir áudio";
             playButton.Invalidate();
         }
-
-        private bool layingOutRow;
-
-        private void LayoutRow()
-        {
-            if (layingOutRow) return;
-            layingOutRow = true;
-            SuspendLayout();
-            try
-            {
-                // Texto e botão têm posição definida explicitamente: a ordem
-                // dos filhos em Controls é z-order (o último adicionado vem
-                // primeiro), então iterar Controls colocava a transcrição na
-                // frente e o prefixo por último, empurrando o texto para fora
-                // da largura da linha (o registro ficava sem texto visível).
-                int available = Parent == null ? Width : Parent.ClientSize.Width;
-                available = Math.Max(160, available - 30);
-
-                prefixLabel.MaximumSize = new Size(
-                    Math.Max(80, available - playButton.Width - 12), 0);
-                int texto = prefixLabel.PreferredWidth;
-                int total = texto + 4 + playButton.Width;
-                int left = Sent ? Math.Max(0, available - total) : 0;
-
-                if (Sent)
-                {
-                    // Enviada: [ícone][texto], encostado na direita.
-                    playButton.Location = new Point(left, 3);
-                    prefixLabel.Location = new Point(playButton.Right + 4, 3);
-                }
-                else
-                {
-                    // Recebida: [texto][ícone].
-                    prefixLabel.Location = new Point(left, 3);
-                    playButton.Location = new Point(prefixLabel.Right + 4, 3);
-                }
-
-                // A transcrição não aparece no histórico (fica no menu).
-                transcriptionLabel.Location = new Point(0, 0);
-                prefixLabel.ForeColor = Sent
-                    ? InboxPanel.SentColor
-                    : Color.FromArgb(31, 41, 55);
-
-                // A largura da linha e definida pelo painel (LayoutRows) com a
-                // largura cheia do recorte: restringi-la ao tamanho do conteudo
-                // recortava fora o texto/botao das linhas enviadas, posicionados
-                // em (available - total).
-                if (Width < available) Width = available;
-                Height = Math.Max(playButton.Height + 2, prefixLabel.Height + 4);
-            }
-            finally
-            {
-                ResumeLayout();
-                layingOutRow = false;
-            }
-        }
     }
+
 
     // Endereço do serviço de transcrição. O padrão é o host `servidor` (o
     // mesmo usado pelo SIG); `localhost` não é usado porque o serviço escuta

@@ -1462,11 +1462,11 @@ namespace TailMsg
         {
             if (bytes >= 1024L * 1024L)
             {
-                return (bytes / (1024.0 * 1024.0)).ToString("0.0", CultureInfo.InvariantCulture) + " MB";
+                return (bytes / (1024.0 * 1024.0)).ToString("0.0", CultureInfo.InvariantCulture) + " mb";
             }
             if (bytes >= 1024L)
             {
-                return (bytes / 1024.0).ToString("0", CultureInfo.InvariantCulture) + " KB";
+                return (bytes / 1024.0).ToString("0", CultureInfo.InvariantCulture) + " kb";
             }
             return bytes.ToString(CultureInfo.InvariantCulture) + " bytes";
         }
@@ -3157,11 +3157,9 @@ namespace TailMsg
                         OperationId = result.OperationId
                     });
                     InboxImageRow row = inboxBox.AppendImage(
-                        InboxPanel.FormatLine(
-                            alvo.Name,
-                            "[arquivo " + ImageTransfer.DescribeBytes(bytes.Length) + "]",
-                            stamp,
-                            true),
+                        alvo.Name,
+                        "(" + ImageTransfer.DescribeBytes(bytes.Length) + ")",
+                        stamp,
                         bytes,
                         null,
                         true,
@@ -3925,6 +3923,32 @@ namespace TailMsg
                 (seconds % 60).ToString("00", CultureInfo.InvariantCulture);
         }
 
+        // Duração nas linhas de áudio do histórico: "(13s)".
+        private static string DescribeAudioSeconds(int seconds)
+        {
+            if (seconds < 0) seconds = 0;
+            return seconds.ToString(CultureInfo.InvariantCulture) + "s";
+        }
+
+        // Extensão (com ponto) a partir do nome recebido, para a mídia ser
+        // salva com o tipo certo. Sem extensão confiável: ".bin".
+        private static string ExtensaoDoNome(string nome)
+        {
+            string extensao = Path.GetExtension(nome ?? "");
+            if (String.IsNullOrEmpty(extensao) || extensao.Length > 10)
+            {
+                return ".bin";
+            }
+            foreach (char c in extensao)
+            {
+                if (!Char.IsLetterOrDigit(c) && c != '.')
+                {
+                    return ".bin";
+                }
+            }
+            return extensao.ToLowerInvariant();
+        }
+
         private void SendMessage()
         {
             if (isSending) return;
@@ -4240,11 +4264,9 @@ namespace TailMsg
                     OperationId = fileId
                 });
                 InboxImageRow row = inboxBox.AppendImage(
-                    InboxPanel.FormatLine(
-                        who,
-                        "[arquivo " + ImageTransfer.DescribeBytes(fileBytes.Length) + "]",
-                        stamp,
-                        true),
+                    who,
+                    "(" + ImageTransfer.DescribeBytes(fileBytes.Length) + ")",
+                    stamp,
                     fileBytes,
                     null,
                     true,
@@ -4271,11 +4293,9 @@ namespace TailMsg
                     OperationId = imageId
                 });
                 InboxImageRow row = inboxBox.AppendImage(
-                    InboxPanel.FormatLine(
-                        who,
-                        "[imagem " + ImageTransfer.DescribeBytes(size) + "]",
-                        stamp,
-                        true),
+                    who,
+                    "(" + ImageTransfer.DescribeBytes(size) + ")",
+                    stamp,
                     image.PngBytes,
                     HistoryStore.MediaPath(file));
                 row.Address = address;
@@ -4299,11 +4319,9 @@ namespace TailMsg
                     OperationId = audioId
                 });
                 InboxAudioRow row = inboxBox.AppendAudio(
-                    InboxPanel.FormatLine(
-                        who,
-                        "[áudio " + FormatDuration(audio.DurationMilliseconds / 1000) + "]",
-                        stamp,
-                        true),
+                    who,
+                    "(" + DescribeAudioSeconds(audio.DurationMilliseconds / 1000) + ")",
+                    stamp,
                     audio,
                     audioId);
                 row.Address = address;
@@ -4466,15 +4484,17 @@ namespace TailMsg
                 // recebida no aplicativo padrão do Windows.
                 string imageStamp = DateTime.Now.ToString("HH:mm");
                 long imageSize = e.ImageBytes == null ? 0 : e.ImageBytes.Length;
-                string imagePrefix = InboxPanel.FormatLine(
-                    e.SenderName,
-                    "[imagem " + ImageTransfer.DescribeBytes(imageSize) + "]",
-                    imageStamp,
-                    false);
-                string imageFile = HistoryStore.SaveMedia(e.ImageBytes, ".png");
+                bool ehArquivo = !String.IsNullOrEmpty(e.FileName);
+                string imageBody = "(" + ImageTransfer.DescribeBytes(imageSize) + ")";
+                // Arquivo recebido fica com a extensão original (antes um PDF
+                // virava ".png" e o visualizador acusava "imagem corrompida")
+                // e entra no histórico como arquivo, não como imagem.
+                string imageFile = HistoryStore.SaveMedia(
+                    e.ImageBytes,
+                    ehArquivo ? ExtensaoDoNome(e.FileName) : ".png");
                 long imageSeq = HistoryStore.Append(new HistoryEntry
                 {
-                    Kind = "image",
+                    Kind = ehArquivo ? "received-file" : "image",
                     Time = imageStamp,
                     Sender = e.SenderName,
                     Address = e.RemoteAddress,
@@ -4482,9 +4502,10 @@ namespace TailMsg
                     FileName = imageFile,
                     OperationId = e.OperationId
                 });
-                bool ehArquivo = !String.IsNullOrEmpty(e.FileName);
                 InboxImageRow receivedImageRow = inboxBox.AppendImage(
-                    imagePrefix,
+                    e.SenderName,
+                    imageBody,
+                    imageStamp,
                     e.ImageBytes,
                     HistoryStore.MediaPath(imageFile),
                     ehArquivo,
@@ -4659,11 +4680,9 @@ namespace TailMsg
                 inboxAudio.DurationMilliseconds = e.DurationMilliseconds;
                 string audioStamp = DateTime.Now.ToString("HH:mm");
                 InboxAudioRow audioRow = inboxBox.AppendAudio(
-                    InboxPanel.FormatLine(
-                        e.SenderName,
-                        "[áudio " + FormatDuration(e.DurationMilliseconds / 1000) + "]",
-                        audioStamp,
-                        false),
+                    e.SenderName,
+                    "(" + DescribeAudioSeconds(e.DurationMilliseconds / 1000) + ")",
+                    audioStamp,
                     inboxAudio,
                     e.OperationId);
                 audioRow.Address = e.RemoteAddress;
@@ -4907,7 +4926,7 @@ namespace TailMsg
             bool isAudio = entry.Kind != null && entry.Kind.EndsWith("audio", StringComparison.Ordinal);
             bool isFile = entry.Kind != null && entry.Kind.EndsWith("file", StringComparison.Ordinal);
 
-            if (!isImage && !isAudio)
+            if (!isImage && !isAudio && !isFile)
             {
                 InboxTextRow row = inboxBox.AppendMessage(
                     entry.Sender, entry.Text, entry.Time, sent, entry.Seq, entry.OperationId);
@@ -4923,12 +4942,9 @@ namespace TailMsg
             if (isImage || isFile)
             {
                 InboxImageRow row = inboxBox.AppendImage(
-                    InboxPanel.FormatLine(
-                        entry.Sender,
-                        "[" + (isFile ? "arquivo" : "imagem") + " " +
-                            ImageTransfer.DescribeBytes(entry.Size) + "]",
-                        entry.Time,
-                        sent),
+                    entry.Sender,
+                    "(" + ImageTransfer.DescribeBytes(entry.Size) + ")",
+                    entry.Time,
                     exists ? File.ReadAllBytes(path) : null,
                     exists ? path : null,
                     isFile,
@@ -4949,11 +4965,9 @@ namespace TailMsg
             payload.WavBytes = File.ReadAllBytes(path);
             payload.DurationMilliseconds = entry.DurationMilliseconds;
             InboxAudioRow audioRow = inboxBox.AppendAudio(
-                InboxPanel.FormatLine(
-                    entry.Sender,
-                    "[áudio " + FormatDuration(entry.DurationMilliseconds / 1000) + "]",
-                    entry.Time,
-                    sent),
+                entry.Sender,
+                "(" + DescribeAudioSeconds(entry.DurationMilliseconds / 1000) + ")",
+                entry.Time,
                 payload,
                 entry.OperationId);
             audioRow.Address = entry.Address;
@@ -6629,38 +6643,57 @@ namespace TailMsg
                     sentImage = imageResult.Success;
                     if (!imageResult.Success) failure = imageResult.ErrorMessage;
 
-                    if (replyFileBytes != null)
+                }
+
+                if (sentImage && attachment != null)
+                {
+                    // A imagem enviada por esta janelinha também persiste no
+                    // histórico (o painel a reexibe ao recarregar).
+                    string arquivoImagem = HistoryStore.SaveMedia(attachment.PngBytes, ".png");
+                    HistoryStore.Append(new HistoryEntry
                     {
-                        MessageSendResult fileResult = MessageSender.SendFile(
-                            peer,
-                            localComputerName,
-                            replyFileName,
+                        Kind = "sent-image",
+                        Time = DateTime.Now.ToString("HH:mm"),
+                        Sender = peer.Name,
+                        Address = peer.Address,
+                        Size = attachment.PngBytes == null ? 0 : attachment.PngBytes.Length,
+                        FileName = arquivoImagem,
+                        OperationId = ""
+                    });
+                    MainForm.NotifyHistoryChanged();
+                }
+
+                if (failure.Length == 0 && replyFileBytes != null)
+                {
+                    MessageSendResult fileResult = MessageSender.SendFile(
+                        peer,
+                        localComputerName,
+                        replyFileName,
+                        replyFileBytes,
+                        null);
+                    sentFile = fileResult.Success;
+                    if (!fileResult.Success && failure.Length == 0)
+                    {
+                        failure = fileResult.ErrorMessage;
+                    }
+                    if (sentFile)
+                    {
+                        // O arquivo enviado por esta janelinha persiste no
+                        // histórico (o painel o reexibe ao recarregar).
+                        string arquivoSalvo = HistoryStore.SaveMedia(
                             replyFileBytes,
-                            null);
-                        sentFile = fileResult.Success;
-                        if (!fileResult.Success && failure.Length == 0)
+                            Path.GetExtension(replyFileName));
+                        HistoryStore.Append(new HistoryEntry
                         {
-                            failure = fileResult.ErrorMessage;
-                        }
-                        if (sentFile)
-                        {
-                            // O arquivo enviado por esta janelinha persiste no
-                            // histórico (o painel o reexibe ao recarregar).
-                            string arquivoSalvo = HistoryStore.SaveMedia(
-                                replyFileBytes,
-                                Path.GetExtension(replyFileName));
-                            HistoryStore.Append(new HistoryEntry
-                            {
-                                Kind = "sent-file",
-                                Time = DateTime.Now.ToString("HH:mm"),
-                                Sender = peer.Name,
-                                Address = peer.Address,
-                                Size = replyFileBytes.Length,
-                                FileName = arquivoSalvo,
-                                OperationId = ""
-                            });
-                            MainForm.NotifyHistoryChanged();
-                        }
+                            Kind = "sent-file",
+                            Time = DateTime.Now.ToString("HH:mm"),
+                            Sender = peer.Name,
+                            Address = peer.Address,
+                            Size = replyFileBytes.Length,
+                            FileName = arquivoSalvo,
+                            OperationId = ""
+                        });
+                        MainForm.NotifyHistoryChanged();
                     }
                 }
 

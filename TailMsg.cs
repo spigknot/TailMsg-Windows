@@ -4903,7 +4903,9 @@ namespace TailMsg
 
             string path = HistoryStore.MediaPath(entry.FileName);
             bool exists = path.Length > 0 && File.Exists(path);
-            if (isImage)
+            // Imagem E arquivo usam o mesmo ramo (o formato "file" traz o nome
+            // do arquivo); sem isto o arquivo enviado virava linha de texto vazia.
+            if (isImage || isFile)
             {
                 InboxImageRow row = inboxBox.AppendImage(
                     InboxPanel.FormatLine(

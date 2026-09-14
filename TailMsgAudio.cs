@@ -2857,62 +2857,41 @@ namespace TailMsg
             SuspendLayout();
             try
             {
-            // Espaço disponível na linha do histórico: o que sobra depois do
-            // prefixo e do botão. A transcrição quebra dentro dele, para a
-            // caixa nunca precisar de barra de rolagem horizontal.
-            int available = Parent == null ? Width : Parent.ClientSize.Width;
-            available = Math.Max(160, available - 30);
-            int reserved = prefixLabel.Width + playButton.Width + 12;
-            transcriptionLabel.MaximumSize = new Size(Math.Max(60, available - reserved), 0);
+                // Texto e botão têm posição definida explicitamente: a ordem
+                // dos filhos em Controls é z-order (o último adicionado vem
+                // primeiro), então iterar Controls colocava a transcrição na
+                // frente e o prefixo por último, empurrando o texto para fora
+                // da largura da linha (o registro ficava sem texto visível).
+                int available = Parent == null ? Width : Parent.ClientSize.Width;
+                available = Math.Max(160, available - 30);
 
-            Control[] children = new Control[Controls.Count];
-            Controls.CopyTo(children, 0);
-            if (playButton != null)
-            {
-                List<Control> ordenado = new List<Control>();
+                prefixLabel.MaximumSize = new Size(
+                    Math.Max(80, available - playButton.Width - 12), 0);
+                int texto = prefixLabel.PreferredWidth;
+                int total = texto + 4 + playButton.Width;
+                int left = Sent ? Math.Max(0, available - total) : 0;
+
                 if (Sent)
                 {
-                    // Enviada: [ícone][texto].
-                    ordenado.Add(playButton);
-                    foreach (Control child in children)
-                    {
-                        if (child != playButton) ordenado.Add(child);
-                    }
+                    // Enviada: [ícone][texto], encostado na direita.
+                    playButton.Location = new Point(left, 3);
+                    prefixLabel.Location = new Point(playButton.Right + 4, 3);
                 }
                 else
                 {
-                    // Recebida: o ícone vem depois do texto.
-                    foreach (Control child in children)
-                    {
-                        if (child == playButton) continue;
-                        ordenado.Add(child);
-                        if (child == prefixLabel) ordenado.Add(playButton);
-                    }
+                    // Recebida: [texto][ícone].
+                    prefixLabel.Location = new Point(left, 3);
+                    playButton.Location = new Point(prefixLabel.Right + 4, 3);
                 }
-                children = ordenado.ToArray();
-            }
 
-            // A linha é posicionada como uma unidade: enviada encosta na
-            // direita (ícone primeiro), recebida começa na esquerda.
-            prefixLabel.ForeColor = Sent ? InboxPanel.SentColor : Color.FromArgb(31, 41, 55);
-            int total = 0;
-            foreach (Control child in children)
-            {
-                total += child.Width + 4;
-            }
-            if (total > 0) total -= 4;
+                // A transcrição não aparece no histórico (fica no menu).
+                transcriptionLabel.Location = new Point(0, 0);
+                prefixLabel.ForeColor = Sent
+                    ? InboxPanel.SentColor
+                    : Color.FromArgb(31, 41, 55);
 
-            int left = Sent ? Math.Max(0, available - total) : 0;
-            int height = 20;
-            foreach (Control child in children)
-            {
-                child.Location = new Point(left, child == playButton ? 0 : 3);
-                left += child.Width + 4;
-                if (child.Height > height) height = child.Height;
-            }
-
-            Width = Math.Min(Math.Max(140, total), available);
-            Height = Math.Max(22, height + 2);
+                Width = Math.Min(Math.Max(140, total), available);
+                Height = Math.Max(playButton.Height + 2, prefixLabel.Height + 4);
             }
             finally
             {

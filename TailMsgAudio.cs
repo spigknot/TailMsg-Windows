@@ -2890,7 +2890,11 @@ namespace TailMsg
                     ? InboxPanel.SentColor
                     : Color.FromArgb(31, 41, 55);
 
-                Width = Math.Min(Math.Max(140, total), available);
+                // A largura da linha e definida pelo painel (LayoutRows) com a
+                // largura cheia do recorte: restringi-la ao tamanho do conteudo
+                // recortava fora o texto/botao das linhas enviadas, posicionados
+                // em (available - total).
+                if (Width < available) Width = available;
                 Height = Math.Max(playButton.Height + 2, prefixLabel.Height + 4);
             }
             finally

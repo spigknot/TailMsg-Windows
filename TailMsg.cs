@@ -4926,7 +4926,10 @@ namespace TailMsg
                 return;
             }
 
-            if (!exists) return;
+            if (!exists)
+            {
+                return;
+            }
             AudioPayload payload = new AudioPayload();
             payload.WavBytes = File.ReadAllBytes(path);
             payload.DurationMilliseconds = entry.DurationMilliseconds;

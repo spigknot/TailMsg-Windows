@@ -1814,6 +1814,8 @@ namespace TailMsg
         private readonly Panel content;
         private readonly ContextMenuStrip sharedMenu;
         private readonly ToolStripMenuItem menuTranscription;
+        private readonly ToolStripControlHost menuThumbnailItem;
+        private readonly PictureBox menuThumbnailPreview;
         private readonly ToolStripMenuItem menuCopy;
         private readonly ToolStripMenuItem menuSaveAs;
         private readonly ToolStripMenuItem menuDelete;
@@ -1905,6 +1907,26 @@ namespace TailMsg
             sharedMenu = new ContextMenuStrip();
             sharedMenu.Font = rowFont;
             menuItalicFont = new Font(rowFont, FontStyle.Italic);
+            // Miniatura da imagem: PictureBox com Zoom (mesmo porte da prévia
+            // do anexo) hospedado no menu. Fica FORA da coluna de imagens —
+            // assim o menu mantém o tamanho normal e só a miniatura cresce.
+            menuThumbnailPreview = new PictureBox();
+            menuThumbnailPreview.Size = new Size(56, 56);
+            menuThumbnailPreview.SizeMode = PictureBoxSizeMode.Zoom;
+            menuThumbnailPreview.BackColor = Color.White;
+            menuThumbnailPreview.Cursor = Cursors.Hand;
+            menuThumbnailPreview.Click += delegate
+            {
+                InboxRowBase alvoMiniatura = RowUnderMenu();
+                sharedMenu.Close();
+                if (alvoMiniatura != null) alvoMiniatura.MenuPrimaryAction();
+            };
+            menuThumbnailItem = new ToolStripControlHost(menuThumbnailPreview);
+            menuThumbnailItem.AutoSize = false;
+            menuThumbnailItem.Size = new Size(132, 64);
+            menuThumbnailItem.Margin = new Padding(6, 4, 6, 2);
+            menuThumbnailPreview.Location = new Point(38, 4);
+            menuThumbnailItem.Visible = false;
             menuTranscription = new ToolStripMenuItem("");
             menuTranscription.Font = menuItalicFont;
             menuTranscription.ForeColor = Color.FromArgb(75, 85, 99);
@@ -1919,6 +1941,7 @@ namespace TailMsg
             menuDeleteAll.Click += SharedMenuDeleteAll;
             // Ordem pedida: transcrição/miniatura/nome, Copiar (imagem),
             // Salvar como, Deletar e Deletar para todos (só enviadas).
+            sharedMenu.Items.Add(menuThumbnailItem);
             sharedMenu.Items.Add(menuTranscription);
             sharedMenu.Items.Add(menuCopy);
             sharedMenu.Items.Add(menuSaveAs);
@@ -2135,37 +2158,32 @@ namespace TailMsg
             InboxRowBase linha = RowUnderMenu();
             if (linha == null) return;
 
-            // Primeiro item: transcrição (áudio), miniatura (imagem) ou nome do
-            // arquivo (clipe). Vale para recebidas E enviadas.
+            // Primeiro item: miniatura (imagem) OU transcrição (áudio) OU
+            // nome do arquivo (clipe). Vale para recebidas E enviadas.
             Image miniatura = linha.MenuThumbnail;
-            string principal = linha.MenuPrimaryText;
-            bool temItem = miniatura != null || !String.IsNullOrEmpty(principal);
-            menuTranscription.Visible = temItem;
-            if (temItem)
+            menuThumbnailItem.Visible = miniatura != null;
+            if (miniatura != null)
             {
-                menuTranscription.Image = miniatura;
-                menuTranscription.ImageScaling = ToolStripItemImageScaling.SizeToFit;
-                if (miniatura != null)
-                {
-                    menuTranscription.Text = "";
-                    menuTranscription.Font = sharedMenu.Font;
-                }
-                else
-                {
-                    bool audio = linha is InboxAudioRow;
-                    menuTranscription.Font = audio ? menuItalicFont : sharedMenu.Font;
-                    menuTranscription.Text = audio ? "\"" + principal + "\"" : principal;
-                }
+                menuThumbnailPreview.Image = miniatura;
+            }
+
+            string principal = linha.MenuPrimaryText;
+            bool temTexto = miniatura == null && !String.IsNullOrEmpty(principal);
+            menuTranscription.Visible = temTexto;
+            if (temTexto)
+            {
+                bool audio = linha is InboxAudioRow;
+                menuTranscription.Font = audio ? menuItalicFont : sharedMenu.Font;
+                menuTranscription.Text = audio ? "\"" + principal + "\"" : principal;
                 menuTranscription.Enabled = true;
             }
             else
             {
-                menuTranscription.Image = null;
                 menuTranscription.Text = "";
                 menuTranscription.Enabled = false;
             }
 
-            menuCopy.Visible = linha.CanCopyImage;
+            menuCopy.Visible = linha.CanCopy;
             menuSaveAs.Visible = linha.CanSaveAs;
             menuDeleteAll.Visible = linha.Sent && !String.IsNullOrEmpty(linha.OperationId);
         }
@@ -2199,7 +2217,7 @@ namespace TailMsg
         {
             InboxRowBase linha = RowUnderMenu();
             if (linha == null) return;
-            linha.CopyImage();
+            linha.CopyContent();
         }
 
         private void SharedMenuSaveAs(object sender, EventArgs e)
@@ -2471,6 +2489,81 @@ namespace TailMsg
     }
 
     // Base das linhas que o menu de contexto pode apagar.
+    // Nomes sugeridos no "Salvar como", no padrão do usuário:
+    //     audio_recebido_de_LUIZ_as_13-54_dia_14-09-2026.wav
+    // (o ':' do horário vira '-' porque o Windows não aceita ':' no nome).
+    internal static class NomeDeMidia
+    {
+        public static string Gerar(
+            string prefixo,
+            bool sent,
+            string quem,
+            string hora,
+            DateTime quando,
+            string extensao)
+        {
+            return prefixo +
+                (sent ? "_enviado_para_" : "_recebido_de_") +
+                Limpar(quem) + "_as_" + Limpar(hora) + "_dia_" +
+                quando.ToString("dd-MM-yyyy", CultureInfo.InvariantCulture) +
+                extensao;
+        }
+
+        // Extensão provável pelo conteúdo (registros antigos sem nome).
+        public static string ExtensaoDoConteudo(byte[] conteudo)
+        {
+            if (conteudo == null || conteudo.Length < 2) return ".bin";
+            if (conteudo.Length >= 8 && conteudo[0] == 0x89 && conteudo[1] == 0x50 &&
+                conteudo[2] == 0x4E && conteudo[3] == 0x47)
+            {
+                return ".png";
+            }
+            if (conteudo.Length >= 4 && conteudo[0] == 0x25 && conteudo[1] == 0x50 &&
+                conteudo[2] == 0x44 && conteudo[3] == 0x46)
+            {
+                return ".pdf";
+            }
+            if (conteudo.Length >= 2 && conteudo[0] == 0xFF && conteudo[1] == 0xD8)
+            {
+                return ".jpg";
+            }
+            if (conteudo.Length >= 4 && conteudo[0] == 0x47 && conteudo[1] == 0x49 &&
+                conteudo[2] == 0x46)
+            {
+                return ".gif";
+            }
+            if (conteudo.Length >= 2 && conteudo[0] == 0x42 && conteudo[1] == 0x4D)
+            {
+                return ".bmp";
+            }
+            if (conteudo.Length >= 4 && conteudo[0] == 0x50 && conteudo[1] == 0x4B)
+            {
+                return ".zip";
+            }
+            if (conteudo.Length >= 4 && conteudo[0] == 0x52 && conteudo[1] == 0x49 &&
+                conteudo[2] == 0x46 && conteudo[3] == 0x46)
+            {
+                return ".wav";
+            }
+            return ".bin";
+        }
+
+        private static string Limpar(string texto)
+        {
+            if (String.IsNullOrEmpty(texto)) return "desconhecido";
+            StringBuilder limpo = new StringBuilder(texto.Length);
+            foreach (char c in texto)
+            {
+                bool proibido = c == ':' || c == '\\' || c == '/' || c == '*' ||
+                    c == '?' || c == '"' || c == '<' || c == '>' || c == '|' ||
+                    c < 32;
+                limpo.Append(proibido ? '-' : c);
+            }
+            string resultado = limpo.ToString().Trim();
+            return resultado.Length == 0 ? "desconhecido" : resultado;
+        }
+    }
+
     internal abstract class InboxRowBase : Panel
     {
         public long Seq { get; set; }
@@ -2479,6 +2572,22 @@ namespace TailMsg
 
         private bool sent;
         private string rowTime = "";
+
+        // Horário da linha (HH:mm): usado nos nomes sugeridos do "Salvar como".
+        public string RowTime { get { return rowTime; } }
+
+        // Data da mensagem: o Seq guarda os ticks; sem ele, hoje.
+        protected DateTime DataDaSequencia()
+        {
+            try
+            {
+                if (Seq > 0) return new DateTime(Seq);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+            }
+            return DateTime.Now;
+        }
 
         // Grade da linha: horário recebido | mensagem recebida | mensagem
         // enviada | horário enviado. O conteúdo da subclasse vive na célula da
@@ -2673,8 +2782,9 @@ namespace TailMsg
         public virtual string MenuPrimaryText { get { return ""; } }
         public virtual Image MenuThumbnail { get { return null; } }
         public virtual void MenuPrimaryAction() { }
-        public virtual bool CanCopyImage { get { return false; } }
-        public virtual void CopyImage() { }
+        // Copiar: imagem (linhas com imagem) ou texto (linhas de mensagem).
+        public virtual bool CanCopy { get { return false; } }
+        public virtual void CopyContent() { }
         public virtual bool CanSaveAs { get { return false; } }
         public virtual void SaveAs() { }
     }
@@ -2879,6 +2989,26 @@ namespace TailMsg
         {
             get { return nameLabel.Text + messageLabel.Text; }
         }
+
+        // Copiar (menu): o texto da mensagem vai para a área de transferência.
+        public override bool CanCopy
+        {
+            get { return messageLabel != null && !String.IsNullOrEmpty(messageLabel.Text); }
+        }
+
+        public override void CopyContent()
+        {
+            string texto = messageLabel == null ? "" : messageLabel.Text;
+            if (String.IsNullOrEmpty(texto)) return;
+            try
+            {
+                Clipboard.SetText(texto);
+            }
+            catch (Exception)
+            {
+                // Sem área de transferência disponível: nada a fazer.
+            }
+        }
     }
 
 
@@ -3071,7 +3201,15 @@ namespace TailMsg
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
                 dialog.Title = "Salvar arquivo";
-                dialog.FileName = String.IsNullOrEmpty(fileName) ? "arquivo" : fileName;
+                dialog.FileName = String.IsNullOrEmpty(fileName)
+                    ? NomeDeMidia.Gerar(
+                        "arquivo",
+                        Sent,
+                        whoText,
+                        RowTime,
+                        DataDaSequencia(),
+                        ExtensaoAparente())
+                    : fileName;
                 dialog.Filter = "Todos os arquivos|*.*";
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 try
@@ -3135,6 +3273,39 @@ namespace TailMsg
             }
         }
 
+        // Miniatura quadrada igual à prévia do anexo (PictureBox com Zoom):
+        // a imagem é ajustada ao quadrado e centralizada, ampliando as
+        // pequenas (a prévia do anexo também amplia).
+        private static Image CriarMiniaturaDaPrevia(byte[] pngBytes, int lado)
+        {
+            try
+            {
+                using (MemoryStream buffer = new MemoryStream(pngBytes))
+                using (Image original = Image.FromStream(buffer))
+                {
+                    Bitmap quadrado = new Bitmap(lado, lado);
+                    using (Graphics desenho = Graphics.FromImage(quadrado))
+                    {
+                        desenho.Clear(Color.White);
+                        desenho.InterpolationMode =
+                            System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        double escala = Math.Min(
+                            (double)lado / original.Width,
+                            (double)lado / original.Height);
+                        int largura = Math.Max(1, (int)Math.Round(original.Width * escala));
+                        int altura = Math.Max(1, (int)Math.Round(original.Height * escala));
+                        desenho.DrawImage(original,
+                            (lado - largura) / 2, (lado - altura) / 2, largura, altura);
+                    }
+                    return quadrado;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         // ---- Ações do menu do botão direito (imagem/arquivo) ---------------
 
         public override string MenuPrimaryText
@@ -3155,8 +3326,9 @@ namespace TailMsg
                 if (asFile || imageBytes == null || imageBytes.Length == 0) return null;
                 if (menuThumbnail == null)
                 {
-                    string error;
-                    menuThumbnail = ImageTransfer.CreateThumbnail(imageBytes, 112, 112, out error);
+                    // Mesmo porte (56x56) da prévia usada ao anexar para
+                    // enviar, com a imagem ajustada e centralizada no quadrado.
+                    menuThumbnail = CriarMiniaturaDaPrevia(imageBytes, 56);
                 }
                 return menuThumbnail;
             }
@@ -3169,12 +3341,12 @@ namespace TailMsg
             OpenImage();
         }
 
-        public override bool CanCopyImage
+        public override bool CanCopy
         {
             get { return !asFile && imageBytes != null && imageBytes.Length > 0; }
         }
 
-        public override void CopyImage()
+        public override void CopyContent()
         {
             string error;
             if (ImageTransfer.TryCopyToClipboard(imageBytes, out error)) return;
@@ -3199,7 +3371,13 @@ namespace TailMsg
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
                 dialog.Title = "Salvar como";
-                dialog.FileName = "imagem.png";
+                dialog.FileName = NomeDeMidia.Gerar(
+                    "imagem",
+                    Sent,
+                    whoText,
+                    RowTime,
+                    DataDaSequencia(),
+                    ".png");
                 dialog.Filter = "Imagem PNG|*.png|Todos os arquivos|*.*";
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 try
@@ -3214,6 +3392,23 @@ namespace TailMsg
                         "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
+        }
+
+        // Extensão aparente do conteúdo salvo (registros antigos sem nome).
+        private string ExtensaoAparente()
+        {
+            try
+            {
+                if (!String.IsNullOrEmpty(filePath) && File.Exists(filePath))
+                {
+                    string extensao = DetectarExtensaoForaDoPng(filePath);
+                    if (extensao != null) return extensao;
+                }
+            }
+            catch
+            {
+            }
+            return String.IsNullOrEmpty(fileName) ? ".bin" : Path.GetExtension(fileName);
         }
 
         private void OpenImage()
@@ -3458,7 +3653,13 @@ namespace TailMsg
             using (SaveFileDialog dialog = new SaveFileDialog())
             {
                 dialog.Title = "Salvar áudio";
-                dialog.FileName = "audio.wav";
+                dialog.FileName = NomeDeMidia.Gerar(
+                    "audio",
+                    Sent,
+                    whoText,
+                    RowTime,
+                    DataDaSequencia(),
+                    ".wav");
                 dialog.Filter = "Áudio WAV|*.wav|Todos os arquivos|*.*";
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 try

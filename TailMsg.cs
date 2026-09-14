@@ -4949,6 +4949,21 @@ namespace TailMsg
             }
         }
 
+        // Nome mostrado/sugerido para arquivos: o original quando conhecido;
+        // nos registros antigos (sem nome), gera no padrão do usuário com a
+        // extensão real do conteúdo.
+        private static string NomeDoArquivoDaEntrada(HistoryEntry entry, byte[] conteudo)
+        {
+            if (!String.IsNullOrEmpty(entry.Text)) return entry.Text;
+            return NomeDeMidia.Gerar(
+                "arquivo",
+                entry.Kind != null && entry.Kind.StartsWith("sent", StringComparison.Ordinal),
+                entry.Sender,
+                entry.Time,
+                TicksToLocalTime(entry.Seq),
+                NomeDeMidia.ExtensaoDoConteudo(conteudo));
+        }
+
         private static DateTime TicksToLocalTime(long ticks)
         {
             if (ticks <= 0) return DateTime.MinValue;
@@ -4985,16 +5000,23 @@ namespace TailMsg
             // do arquivo); sem isto o arquivo enviado virava linha de texto vazia.
             if (isImage || isFile)
             {
+                byte[] conteudo = exists ? File.ReadAllBytes(path) : null;
+                // Correção de registros antigos: um "image" cujo arquivo não é
+                // PNG foi, na verdade, um ARQUIVO recebido (os envios novos já
+                // gravam o tipo certo). Vira linha de clipe, com nome de arquivo.
+                if (isImage && conteudo != null && !NetworkService.IsPngSignature(conteudo))
+                {
+                    isImage = false;
+                    isFile = true;
+                }
                 InboxImageRow row = inboxBox.AppendImage(
                     entry.Sender,
                     "(" + ImageTransfer.DescribeBytes(entry.Size) + ")",
                     entry.Time,
-                    exists ? File.ReadAllBytes(path) : null,
+                    conteudo,
                     exists ? path : null,
                     isFile,
-                    isFile
-                        ? (String.IsNullOrEmpty(entry.Text) ? entry.FileName : entry.Text)
-                        : "");
+                    isFile ? NomeDoArquivoDaEntrada(entry, conteudo) : "");
                 row.Address = entry.Address;
                 row.Seq = entry.Seq;
                 row.OperationId = entry.OperationId;

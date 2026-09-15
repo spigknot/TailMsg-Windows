@@ -3143,14 +3143,14 @@ namespace TailMsg
             openButton.Click += delegate { OpenImage(); };
             ContentCell.Controls.Add(openButton);
 
-            // Selo "xN" fora do ícone (à direita, embaixo), menor que o botão:
-            // igual ao selo da prévia antes de enviar.
+            // Selo "xN" fora do ícone (à direita, embaixo): texto escuro
+            // direto na tela, sem quadro — igual à prévia antes de enviar.
             badgeLabel = new Label();
             badgeLabel.AutoSize = true;
             badgeLabel.Font = new Font(font.FontFamily, 7F, FontStyle.Bold);
-            badgeLabel.Padding = new Padding(3, 1, 3, 1);
-            badgeLabel.BackColor = Color.FromArgb(31, 41, 55);
-            badgeLabel.ForeColor = Color.White;
+            badgeLabel.Padding = new Padding(0);
+            badgeLabel.BackColor = Color.Transparent;
+            badgeLabel.ForeColor = Color.Black;
             badgeLabel.Text = "x" + fileCount.ToString(CultureInfo.InvariantCulture);
             badgeLabel.Visible = fileCount > 1;
             ContentCell.Controls.Add(badgeLabel);
@@ -3217,7 +3217,7 @@ namespace TailMsg
 
                 int gap = 4;
                 int folga = 2;
-                int espacoSelo = fileCount > 1 ? 2 : 0;
+                int espacoSelo = fileCount > 1 ? 1 : 0;
                 int larguraLinha2 = openButton.Width + espacoSelo + seloW +
                     gap + tamanhoCorpo.Width;
                 int alturaLinha2 = Math.Max(openButton.Height, tamanhoCorpo.Height);

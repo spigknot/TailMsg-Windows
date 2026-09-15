@@ -1546,6 +1546,9 @@ namespace TailMsg
             new List<ReceivedMessageForm>();
         private Panel imagePreviewPanel;
         private Panel imagePreviewBorder;
+        // Faixa "Anexos" (linha 5, acima do "Mensagem"): legenda + prévia.
+        private Panel anexosPanel;
+        private Label anexosLabel;
         private PictureBox imagePreviewBox;
         private Label imagePreviewLabel;
         private TableLayoutPanel contentLayout;
@@ -1814,9 +1817,10 @@ namespace TailMsg
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 10F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 59F));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
-            // Linhas dos anexos: altura zero enquanto não houver imagem/áudio.
+            // Linha 5 (anexos: legenda + prévia) começa zerada; a 6 é o
+            // "Mensagem" colado na caixa; a 7 (áudio) só abre ao gravar.
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 24F));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
@@ -2006,12 +2010,27 @@ namespace TailMsg
             inboxBox.DeleteRequested += InboxDeleteRequested;
             LoadHistoryIntoInbox();
 
+            // Faixa de anexos (linha 5): legenda "Anexos" + prévia, ACIMA do
+            // "Mensagem" — que segue colado na caixa de texto (linha 6).
+            anexosPanel = new Panel();
+            anexosPanel.Dock = DockStyle.Fill;
+            anexosPanel.Margin = new Padding(0);
+            anexosPanel.Visible = false;
+            anexosLabel = new Label();
+            anexosLabel.Dock = DockStyle.Top;
+            anexosLabel.Height = 24;
+            anexosLabel.Text = "Anexos";
+            anexosLabel.Font = new Font("Segoe UI Semibold", 10F);
+            anexosLabel.TextAlign = ContentAlignment.BottomLeft;
+            anexosPanel.Controls.Add(anexosLabel);
+            layout.Controls.Add(anexosPanel, 0, 5);
+
             Label messageLabel = new Label();
             messageLabel.Dock = DockStyle.Fill;
             messageLabel.Text = "Mensagem";
             messageLabel.Font = new Font("Segoe UI Semibold", 10F);
             messageLabel.TextAlign = ContentAlignment.BottomLeft;
-            layout.Controls.Add(messageLabel, 0, 5);
+            layout.Controls.Add(messageLabel, 0, 6);
 
             messageBox = new MessageTextBox();
             messageBox.Dock = DockStyle.Fill;
@@ -2026,17 +2045,20 @@ namespace TailMsg
             messageBox.ImagePasteFailed += MessageImagePasteFailed;
             layout.Controls.Add(messageBox, 0, 8);
 
+            // Prévia do anexo direto no painel (sem quadro): ocupa o fundo da
+            // faixa "Anexos", abaixo da legenda.
             Panel previewBorder = new Panel();
-            previewBorder.Dock = DockStyle.Fill;
-            previewBorder.Padding = new Padding(1);
-            previewBorder.BackColor = Color.FromArgb(209, 213, 219);
+            previewBorder.Dock = DockStyle.Bottom;
+            previewBorder.Height = 60;
+            previewBorder.Padding = new Padding(0);
+            previewBorder.BackColor = content.BackColor;
             previewBorder.Visible = false;
-            layout.Controls.Add(previewBorder, 0, 6);
+            anexosPanel.Controls.Add(previewBorder);
             imagePreviewBorder = previewBorder;
 
             imagePreviewPanel = new Panel();
             imagePreviewPanel.Dock = DockStyle.Fill;
-            imagePreviewPanel.BackColor = Color.White;
+            imagePreviewPanel.BackColor = content.BackColor;
             previewBorder.Controls.Add(imagePreviewPanel);
 
             imagePreviewBox = new PictureBox();
@@ -3350,29 +3372,12 @@ namespace TailMsg
             }
             else
             {
-                imagePreviewLabel.Text = pendingFiles.Count + " arquivos anexados: " +
-                    ShortFileList(pendingFiles) + " — " +
-                    ImageTransfer.DescribeBytes(TotalPendingBytes()) + " (zip no envio)";
+                imagePreviewLabel.Text = pendingFiles.Count + " arquivos (" +
+                    ImageTransfer.DescribeBytes(TotalPendingBytes()) + ")";
             }
             ShowImagePreview(true);
             UpdateActionStates();
             RefreshZipButton();
-        }
-
-        private static string ShortFileList(List<PendingFile> files)
-        {
-            StringBuilder text = new StringBuilder();
-            int shown = Math.Min(3, files.Count);
-            for (int index = 0; index < shown; index++)
-            {
-                if (index > 0) text.Append(", ");
-                text.Append(files[index] == null ? "" : (files[index].Name ?? ""));
-            }
-            if (files.Count > shown)
-            {
-                text.Append(" e mais " + (files.Count - shown));
-            }
-            return text.ToString();
         }
 
         private long TotalPendingBytes()
@@ -3527,12 +3532,15 @@ namespace TailMsg
             pendingImageThumbnail = null;
         }
 
+        // Faixa "Anexos" (legenda de 24 + prévia de 60): abre acima do
+        // "Mensagem", sem mover a caixa de texto.
         private void ShowImagePreview(bool visible)
         {
             if (imagePreviewBorder != null) imagePreviewBorder.Visible = visible;
+            if (anexosPanel != null) anexosPanel.Visible = visible;
             if (contentLayout != null && contentLayout.RowStyles.Count > 6)
             {
-                contentLayout.RowStyles[6].Height = visible ? 62F : 0F;
+                contentLayout.RowStyles[5].Height = visible ? 86F : 0F;
             }
         }
 

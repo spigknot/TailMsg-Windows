@@ -6463,28 +6463,10 @@ namespace TailMsg
             }
             else
             {
-                replyAttachmentLabel.Text = replyPendingFiles.Count + " anexos: " +
-                    ShortReplyFileList() + " — " +
-                    ImageTransfer.DescribeBytes(TotalReplyBytes()) + " (zip no envio)";
+                replyAttachmentLabel.Text = replyPendingFiles.Count + " arquivos (" +
+                    ImageTransfer.DescribeBytes(TotalReplyBytes()) + ")";
             }
             ApplyReplyLayout();
-        }
-
-        private string ShortReplyFileList()
-        {
-            StringBuilder text = new StringBuilder();
-            int shown = Math.Min(3, replyPendingFiles.Count);
-            for (int index = 0; index < shown; index++)
-            {
-                if (index > 0) text.Append(", ");
-                PendingFile file = replyPendingFiles[index];
-                text.Append(file == null ? "" : (file.Name ?? ""));
-            }
-            if (replyPendingFiles.Count > shown)
-            {
-                text.Append(" e mais " + (replyPendingFiles.Count - shown));
-            }
-            return text.ToString();
         }
 
         private long TotalReplyBytes()

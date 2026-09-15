@@ -1559,6 +1559,7 @@ namespace TailMsg
         private ContextMenuStrip zipMenu;
         private Font zipRegularFont;
         private Font zipSelectedFont;
+        private Panel zipPanel;
         private Label imagePreviewBadge;
         private Bitmap pendingImageThumbnail;
         private AudioTrackPanel audioPreviewPanel;
@@ -1757,13 +1758,12 @@ namespace TailMsg
             resizeMicButtons(null, EventArgs.Empty);
             UpdateRecordButtons();
 
-            // Nível de compactação do zip (0-9, 1 = padrão): canto inferior
-            // esquerdo, na altura do clipe e dos microfones. Só aparece com
-            // 2+ arquivos pendentes (1 arquivo vai direto, sem zip).
+            // Nível de compactação do zip (0-9, 1 = padrão): a faixa entra na
+            // linha 9, logo abaixo da caixa de mensagem. O menu usa o tamanho
+            // automático (o tamanho fixo colapsava os itens).
             zipRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular);
             zipSelectedFont = new Font("Segoe UI", 9F, FontStyle.Bold);
             zipMenu = new ContextMenuStrip();
-            zipMenu.AutoSize = false;
             zipMenu.ShowCheckMargin = false;
             zipMenu.ShowImageMargin = false;
             for (int zipOption = 0; zipOption <= 9; zipOption++)
@@ -1771,9 +1771,6 @@ namespace TailMsg
                 int zipLevel = zipOption;
                 ToolStripMenuItem zipItem = new ToolStripMenuItem(
                     zipOption.ToString(CultureInfo.InvariantCulture));
-                zipItem.AutoSize = false;
-                zipItem.Height = 22;
-                zipItem.Width = 64;
                 zipItem.Click += delegate
                 {
                     zipCompressionLevel = zipLevel;
@@ -1782,19 +1779,17 @@ namespace TailMsg
                 zipMenu.Items.Add(zipItem);
             }
             zipButton = new Button();
-            zipButton.Text = "Zip 1";
-            zipButton.Width = 64;
-            zipButton.Dock = DockStyle.Left;
+            zipButton.Text = "Compactação: 1";
+            zipButton.AutoSize = true;
+            zipButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            zipButton.Location = new Point(0, 10);
             zipButton.BackColor = Color.FromArgb(55, 65, 81);
             zipButton.ForeColor = Color.White;
             zipButton.FlatStyle = FlatStyle.Flat;
             zipButton.FlatAppearance.BorderSize = 0;
             zipButton.Cursor = Cursors.Hand;
-            zipButton.Visible = false;
             zipButton.AccessibleName = "Nível de compactação do zip (0 a 9)";
             zipButton.Click += ZipButtonClick;
-            zipMenu.Width = zipButton.Width;
-            footer.Controls.Add(zipButton);
             UpdateZipMenu();
 
             statusLabel = new Label();
@@ -1827,6 +1822,15 @@ namespace TailMsg
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0F));
             content.Controls.Add(layout);
             contentLayout = layout;
+
+            // Faixa do botão de compactação (linha 9, logo abaixo da caixa de
+            // mensagem): altura zero até haver 2+ arquivos pendentes.
+            zipPanel = new Panel();
+            zipPanel.Dock = DockStyle.Fill;
+            zipPanel.Margin = new Padding(0);
+            zipPanel.Visible = false;
+            zipPanel.Controls.Add(zipButton);
+            layout.Controls.Add(zipPanel, 0, 9);
 
             updateButton = new Button();
             updateButton.Text = "Atualização disponível";
@@ -3381,14 +3385,17 @@ namespace TailMsg
             return total;
         }
 
-        // Botão do zip (canto inferior esquerdo, na altura dos microfones):
-        // só aparece com 2+ arquivos pendentes. O clipe ganha o selo "xN".
+        // Botão de compactação (faixa logo abaixo da caixa de mensagem, a
+        // 10 px da borda): só aparece com 2+ arquivos pendentes. O clipe
+        // ganha o selo "xN".
         private void RefreshZipButton()
         {
             int count = pendingFiles == null ? 0 : pendingFiles.Count;
-            if (zipButton != null)
+            bool showZip = count > 1;
+            if (zipPanel != null) zipPanel.Visible = showZip;
+            if (contentLayout != null && contentLayout.RowStyles.Count > 9)
             {
-                zipButton.Visible = count > 1;
+                contentLayout.RowStyles[9].Height = showZip ? 34F : 0F;
             }
             UpdateZipMenu();
             if (clipButton != null)
@@ -3404,7 +3411,7 @@ namespace TailMsg
             if (zipMenu == null) return;
             if (zipButton != null)
             {
-                zipButton.Text = "Zip " + zipCompressionLevel;
+                zipButton.Text = "Compactação: " + zipCompressionLevel;
             }
             if (zipRegularFont == null || zipSelectedFont == null) return;
             foreach (ToolStripItem item in zipMenu.Items)
@@ -3422,8 +3429,7 @@ namespace TailMsg
         {
             if (zipMenu == null || zipButton == null) return;
             UpdateZipMenu();
-            Size menuSize = zipMenu.GetPreferredSize(new Size(zipButton.Width, 0));
-            zipMenu.Show(zipButton, new Point(0, -menuSize.Height));
+            zipMenu.Show(zipButton, new Point(0, 0), ToolStripDropDownDirection.AboveLeft);
         }
 
         // Selo "xN" sobre o ícone da prévia do anexo (PictureBox 56x56).
@@ -6006,8 +6012,8 @@ namespace TailMsg
 
             // Nível de compactação do zip (0-9, 1 = padrão), no lugar do
             // antigo seletor de transparência. Só aparece com 2+ arquivos.
+            // O menu usa o tamanho automático (o tamanho fixo colapsava).
             replyZipMenu = new ContextMenuStrip();
-            replyZipMenu.AutoSize = false;
             replyZipMenu.ShowCheckMargin = false;
             replyZipMenu.ShowImageMargin = false;
             replyZipRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular);
@@ -6017,9 +6023,6 @@ namespace TailMsg
                 int zipOptionLevel = zipOption;
                 ToolStripMenuItem option = new ToolStripMenuItem(
                     zipOption.ToString(CultureInfo.InvariantCulture));
-                option.AutoSize = false;
-                option.Height = 22;
-                option.Width = 52;
                 option.Click += delegate
                 {
                     replyZipLevel = zipOptionLevel;
@@ -6029,8 +6032,9 @@ namespace TailMsg
             }
 
             replyZipButton = new Button();
-            replyZipButton.Text = "Zip 1";
-            replyZipButton.Size = new Size(52, 22);
+            replyZipButton.Text = "Compactação: 1";
+            replyZipButton.AutoSize = true;
+            replyZipButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             replyZipButton.Location = new Point(5, hasAudio ? 279 : 221);
             replyZipButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             replyZipButton.BackColor = Color.FromArgb(55, 65, 81);
@@ -6040,9 +6044,6 @@ namespace TailMsg
             replyZipButton.Cursor = Cursors.Hand;
             replyZipButton.AccessibleName = "Nível de compactação do zip (0 a 9)";
             replyZipButton.Click += ReplyZipButtonClick;
-            replyZipMenu.Width = replyZipButton.Width;
-            replyZipMenu.Height =
-                (replyZipMenu.Items.Count * replyZipButton.Height) + 4;
             replyZipButton.Visible = false;
             body.Controls.Add(replyZipButton);
 
@@ -7145,19 +7146,13 @@ namespace TailMsg
         {
             if (replyZipMenu == null || replyZipButton == null) return;
             UpdateReplyZipMenu();
-            Size menuSize = replyZipMenu.GetPreferredSize(
-                new Size(replyZipButton.Width, 0));
-            replyZipMenu.Show(
-                replyZipButton,
-                new Point(
-                    0,
-                    -menuSize.Height));
+            replyZipMenu.Show(replyZipButton, new Point(0, 0), ToolStripDropDownDirection.AboveLeft);
         }
 
         private void UpdateReplyZipMenu()
         {
             if (replyZipButton == null || replyZipMenu == null) return;
-            replyZipButton.Text = "Zip " + replyZipLevel;
+            replyZipButton.Text = "Compactação: " + replyZipLevel;
             if (replyZipRegularFont == null || replyZipSelectedFont == null) return;
             foreach (ToolStripItem item in replyZipMenu.Items)
             {

@@ -1073,6 +1073,22 @@ namespace TailMsg
         // com transparência) em vez do desenho vetorial. O círculo de fundo já
         // faz parte da imagem.
         public Image SourceImage;
+        // Selo de contagem ("x2", "x3") no canto inferior direito, usado pelo
+        // clipe quando há vários arquivos (pendentes ou no histórico).
+        private string badgeText = "";
+        public string BadgeText
+        {
+            get { return badgeText; }
+            set
+            {
+                string text = value ?? "";
+                if (badgeText != text)
+                {
+                    badgeText = text;
+                    Invalidate();
+                }
+            }
+        }
         // Círculo de fundo.
         public Color CircleColor = Color.White;
         public Color CircleOutline = Color.FromArgb(118, 130, 130);
@@ -1194,6 +1210,7 @@ namespace TailMsg
                             attributes);
                     }
                 }
+                DrawBadge(graphics);
                 return;
             }
 
@@ -1248,6 +1265,30 @@ namespace TailMsg
                 CheckColor,
                 ControlColor,
                 ControlOutline);
+            DrawBadge(graphics);
+        }
+
+        // Selo "xN" no canto inferior direito, sobre o ícone (clipe com
+        // vários arquivos). Cabe em botões de 22 px ou mais.
+        private void DrawBadge(Graphics graphics)
+        {
+            if (String.IsNullOrEmpty(badgeText)) return;
+            float side = Math.Min(Width, Height);
+            float fontSize = side < 30F ? 7F : 8F;
+            using (Font font = new Font("Segoe UI", fontSize, FontStyle.Bold))
+            {
+                SizeF textSize = graphics.MeasureString(badgeText, font);
+                int pillWidth = (int)Math.Ceiling(textSize.Width) + 8;
+                int pillHeight = (int)Math.Ceiling(textSize.Height) + 2;
+                int x = Math.Max(0, Width - pillWidth - 1);
+                int y = Math.Max(0, Height - pillHeight - 1);
+                using (SolidBrush background = new SolidBrush(Color.FromArgb(31, 41, 55)))
+                using (SolidBrush foreground = new SolidBrush(Color.White))
+                {
+                    graphics.FillRectangle(background, x, y, pillWidth, pillHeight);
+                    graphics.DrawString(badgeText, font, foreground, x + 4, y + 1);
+                }
+            }
         }
 
         // Coordenadas e cores copiadas do SIG Windows (canvas 44 x 44).
@@ -2073,12 +2114,14 @@ namespace TailMsg
             byte[] imageBytes,
             string filePath,
             bool asFile = false,
-            string fileName = "")
+            string fileName = "",
+            int fileCount = 1,
+            string fileNames = "")
         {
             // Imagem/arquivo ao vivo: garante a divisória do dia antes dela.
             if (!bulkLoad) GarantirDivisaoDeData(DateTime.Now);
             InboxImageRow row = asFile
-                ? new InboxImageRow(who, body, imageBytes, filePath, PlayerSize, rowFont, true, fileName)
+                ? new InboxImageRow(who, body, imageBytes, filePath, PlayerSize, rowFont, true, fileName, fileCount, fileNames)
                 : new InboxImageRow(who, body, imageBytes, filePath, PlayerSize, rowFont);
             row.SetRowTime(time);
             AddRow(row);
@@ -3020,6 +3063,10 @@ namespace TailMsg
         // Linha de arquivo: ícone do clipe e clique = salvar como.
         private readonly bool asFile;
         private readonly string fileName;
+        // Pacote com vários arquivos (zip transparente): quantidade e nomes
+        // originais separados por "\n"; 0/1 = arquivo único.
+        private readonly int fileCount;
+        private readonly string fileNames;
         private readonly string whoText;
         private readonly string bodyText;
         private readonly Label whoLabel;
@@ -3049,12 +3096,16 @@ namespace TailMsg
             int iconSize,
             Font font,
             bool asFile,
-            string fileName)
+            string fileName,
+            int fileCount = 1,
+            string fileNames = "")
         {
             this.imageBytes = imageBytes;
             this.filePath = filePath;
             this.asFile = asFile;
             this.fileName = fileName;
+            this.fileCount = fileCount <= 0 ? 1 : fileCount;
+            this.fileNames = fileNames ?? "";
             whoText = who ?? "";
             bodyText = body ?? "";
             BackColor = Color.White;
@@ -3081,6 +3132,9 @@ namespace TailMsg
             openButton.CircleColor = Color.White;
             openButton.CircleOutline = Color.FromArgb(196, 202, 210);
             openButton.Size = new Size(iconSize, iconSize);
+            openButton.BadgeText = fileCount > 1
+                ? ("x" + fileCount.ToString(CultureInfo.InvariantCulture))
+                : "";
             openButton.Location = new Point(0, 0);
             openButton.Enabled = HasImage();
             openButton.AccessibleName = asFile ? "Abrir arquivo" : "Abrir imagem";
@@ -3123,7 +3177,7 @@ namespace TailMsg
             // do ClientSize da célula, que pode estar defasado.
             int available = CellContentWidth;
             string sig = whoText + "|" + bodyText + "|" + (Sent ? "1" : "0") + "|" +
-                available + "|" + openButton.Width;
+                available + "|" + openButton.Width + "|" + fileCount;
             if (sig == lastSig) return;
 
             layingOutRow = true;
@@ -3226,6 +3280,55 @@ namespace TailMsg
             }
         }
 
+        // Pacote com vários arquivos: escolhe a pasta e descompacta tudo lá
+        // (por trás é um zip; o usuário só vê o clipe com "xN").
+        private void SaveBundleAs()
+        {
+            byte[] zipBytes = imageBytes;
+            if ((zipBytes == null || zipBytes.Length == 0) &&
+                !String.IsNullOrEmpty(filePath) && File.Exists(filePath))
+            {
+                try
+                {
+                    zipBytes = File.ReadAllBytes(filePath);
+                }
+                catch
+                {
+                    zipBytes = null;
+                }
+            }
+            if (zipBytes == null || zipBytes.Length == 0)
+            {
+                MessageBox.Show(this, "Este arquivo não está mais disponível.",
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            List<FileZipBundle.ZipEntry> entries;
+            if (!FileZipBundle.TryRead(zipBytes, out entries) || entries.Count == 0)
+            {
+                MessageBox.Show(this, "Não foi possível abrir o pacote de arquivos.",
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "Escolher a pasta para salvar os " +
+                    entries.Count + " arquivos";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                int saved;
+                string error;
+                if (!FileZipBundle.TryExtractToFolder(
+                    entries, dialog.SelectedPath, out saved, out error))
+                {
+                    MessageBox.Show(this, "Não foi possível salvar: " + error,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                MessageBox.Show(this, saved + " arquivos salvos em " + dialog.SelectedPath,
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
         // Confere o começo do arquivo: devolve null quando já é PNG (abre
         // como está) e a extensão certa quando é outro tipo conhecido.
         private static string DetectarExtensaoForaDoPng(string caminho)
@@ -3313,10 +3416,25 @@ namespace TailMsg
             get
             {
                 if (!asFile) return "";
+                if (fileCount > 1) return DescribeBundle();
                 return String.IsNullOrEmpty(fileName)
                     ? Path.GetFileName(filePath)
                     : fileName;
             }
+        }
+
+        // "3 arquivos: a.pdf, b.doc, ..." (curto, para o menu do botão direito).
+        private string DescribeBundle()
+        {
+            string list = String.Join(", ", SplitBundleNames());
+            if (list.Length > 80) list = list.Substring(0, 77) + "...";
+            return fileCount + " arquivos: " + list;
+        }
+
+        private string[] SplitBundleNames()
+        {
+            if (String.IsNullOrEmpty(fileNames)) return new string[0];
+            return fileNames.Split(new char[] { '\n' });
         }
 
         public override Image MenuThumbnail
@@ -3338,6 +3456,12 @@ namespace TailMsg
         // aplicativo padrão do sistema.
         public override void MenuPrimaryAction()
         {
+            if (asFile && fileCount > 1)
+            {
+                // Pacote: o clique abre o "salvar como" (pasta).
+                SaveAs();
+                return;
+            }
             OpenImage();
         }
 
@@ -3363,6 +3487,12 @@ namespace TailMsg
         {
             if (asFile)
             {
+                if (fileCount > 1)
+                {
+                    // Pacote: descompacta tudo na pasta que o usuário escolher.
+                    SaveBundleAs();
+                    return;
+                }
                 // Arquivo: o diálogo já sugere o nome original.
                 SaveFileAs();
                 return;

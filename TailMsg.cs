@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -308,6 +309,10 @@ namespace TailMsg
             {
                 imageFailure = AudioSelfTests.TranscriptionFailure();
             }
+            if (imageFailure.Length == 0)
+            {
+                imageFailure = FileBundleSelfTests.BundleFailure();
+            }
 
             if (!valid10 || !validTailscale || invalidTailscale ||
                 decoded != "Olá | TailMsg" || !largeMessageValid ||
@@ -324,7 +329,7 @@ namespace TailMsg
 
             Console.WriteLine(
                 "OK - protocolo, filtros de endereço, política de colagem, " +
-                "imagem, áudio e leitura de transcrição funcionando.");
+                "imagem, áudio, pacote de arquivos e leitura de transcrição funcionando.");
         }
 
         private static void RunIntegrationSelfTest(string operationId)
@@ -544,7 +549,9 @@ namespace TailMsg
     {
         private const string SettingsKey = @"Software\TailMsg";
         private const string TransparencyValue = "NotificationTransparencyPercent";
-        public const int DefaultTransparencyPercent = 30;
+        // Sem seletor na interface: as janelinhas de resposta ficam sempre
+        // opacas (transparência zero).
+        public const int DefaultTransparencyPercent = 0;
         public const int MinimumTransparencyPercent = 0;
         public const int MaximumTransparencyPercent = 80;
 
@@ -1543,8 +1550,16 @@ namespace TailMsg
         private Label imagePreviewLabel;
         private TableLayoutPanel contentLayout;
         private ImagePayload pendingImage;
-        private byte[] pendingFileBytes;
-        private string pendingFileName;
+        // Arquivos pendentes do clipe: 0 = nenhum, 1 = envio direto,
+        // 2+ = pacote zip transparente (nível em zipCompressionLevel).
+        private List<PendingFile> pendingFiles = new List<PendingFile>();
+        // Nível de compactação do zip (0 = sem compactação, 1 = padrão).
+        private int zipCompressionLevel = 1;
+        private Button zipButton;
+        private ContextMenuStrip zipMenu;
+        private Font zipRegularFont;
+        private Font zipSelectedFont;
+        private Label imagePreviewBadge;
         private Bitmap pendingImageThumbnail;
         private AudioTrackPanel audioPreviewPanel;
         private IconButton recordButton;          // microfone branco
@@ -1741,6 +1756,46 @@ namespace TailMsg
             sendButton.Resize += resizeMicButtons;
             resizeMicButtons(null, EventArgs.Empty);
             UpdateRecordButtons();
+
+            // Nível de compactação do zip (0-9, 1 = padrão): canto inferior
+            // esquerdo, na altura do clipe e dos microfones. Só aparece com
+            // 2+ arquivos pendentes (1 arquivo vai direto, sem zip).
+            zipRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular);
+            zipSelectedFont = new Font("Segoe UI", 9F, FontStyle.Bold);
+            zipMenu = new ContextMenuStrip();
+            zipMenu.AutoSize = false;
+            zipMenu.ShowCheckMargin = false;
+            zipMenu.ShowImageMargin = false;
+            for (int zipOption = 0; zipOption <= 9; zipOption++)
+            {
+                int zipLevel = zipOption;
+                ToolStripMenuItem zipItem = new ToolStripMenuItem(
+                    zipOption.ToString(CultureInfo.InvariantCulture));
+                zipItem.AutoSize = false;
+                zipItem.Height = 22;
+                zipItem.Width = 64;
+                zipItem.Click += delegate
+                {
+                    zipCompressionLevel = zipLevel;
+                    RefreshZipButton();
+                };
+                zipMenu.Items.Add(zipItem);
+            }
+            zipButton = new Button();
+            zipButton.Text = "Zip 1";
+            zipButton.Width = 64;
+            zipButton.Dock = DockStyle.Left;
+            zipButton.BackColor = Color.FromArgb(55, 65, 81);
+            zipButton.ForeColor = Color.White;
+            zipButton.FlatStyle = FlatStyle.Flat;
+            zipButton.FlatAppearance.BorderSize = 0;
+            zipButton.Cursor = Cursors.Hand;
+            zipButton.Visible = false;
+            zipButton.AccessibleName = "Nível de compactação do zip (0 a 9)";
+            zipButton.Click += ZipButtonClick;
+            zipMenu.Width = zipButton.Width;
+            footer.Controls.Add(zipButton);
+            UpdateZipMenu();
 
             statusLabel = new Label();
             statusLabel.Dock = DockStyle.Fill;
@@ -1986,6 +2041,16 @@ namespace TailMsg
             imagePreviewBox.SizeMode = PictureBoxSizeMode.Zoom;
             imagePreviewBox.BackColor = Color.FromArgb(243, 244, 246);
             imagePreviewPanel.Controls.Add(imagePreviewBox);
+
+            // Selo "xN" sobre o clipe da prévia quando houver 2+ arquivos.
+            imagePreviewBadge = new Label();
+            imagePreviewBadge.AutoSize = true;
+            imagePreviewBadge.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+            imagePreviewBadge.BackColor = Color.FromArgb(31, 41, 55);
+            imagePreviewBadge.ForeColor = Color.White;
+            imagePreviewBadge.Visible = false;
+            imagePreviewBox.Controls.Add(imagePreviewBadge);
+            imagePreviewBox.Resize += delegate { PositionPreviewBadge(); };
 
             imagePreviewLabel = new Label();
             imagePreviewLabel.AutoSize = false;
@@ -3048,8 +3113,10 @@ namespace TailMsg
             statusLabel.Text = e.ErrorMessage;
         }
 
-        // Abre o seletor de arquivos. Imagens entram pelo caminho normal
-        // (miniatura); os demais arquivos ainda não têm transporte próprio.
+        // Abre o seletor de arquivos: permite escolher vários de uma vez ou
+        // acrescentar um depois (cada escolha acumula na pendência). Uma única
+        // imagem, sem pendência, entra pelo caminho normal (miniatura); todo o
+        // resto acumula como arquivo (2+ vão num zip transparente no envio).
         private void AttachFileFromClip()
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
@@ -3057,22 +3124,31 @@ namespace TailMsg
                 dialog.Title = "Anexar arquivo";
                 dialog.Filter = "Todos os arquivos|*.*|" +
                     "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif";
-                dialog.Multiselect = false;
+                dialog.Multiselect = true;
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                if (dialog.FileNames == null || dialog.FileNames.Length == 0) return;
 
-                string extensao = Path.GetExtension(dialog.FileName).ToLowerInvariant();
+                // Vários de uma vez, ou mais um sobre arquivos pendentes:
+                // acumula tudo como arquivo original.
+                if (dialog.FileNames.Length > 1 || pendingFiles.Count > 0)
+                {
+                    AddPendingFiles(dialog.FileNames);
+                    return;
+                }
+
+                string extensao = Path.GetExtension(dialog.FileNames[0]).ToLowerInvariant();
                 bool ehImagem = extensao == ".png" || extensao == ".jpg" ||
                     extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
                 if (!ehImagem)
                 {
-                    SetPendingFile(dialog.FileName);
+                    SetPendingFile(dialog.FileNames[0]);
                     return;
                 }
 
                 try
                 {
                     // Normaliza para PNG (o transporte exige PNG).
-                    using (Image origem = Image.FromFile(dialog.FileName))
+                    using (Image origem = Image.FromFile(dialog.FileNames[0]))
                     using (Bitmap copia = new Bitmap(origem))
                     using (MemoryStream buffer = new MemoryStream())
                     {
@@ -3204,14 +3280,175 @@ namespace TailMsg
             }
 
             ClearPendingImage();
-            pendingFileBytes = bytes;
-            pendingFileName = Path.GetFileName(caminho);
+            PendingFile entry = new PendingFile();
+            entry.Name = Path.GetFileName(caminho);
+            entry.Bytes = bytes;
+            pendingFiles.Add(entry);
+            ShowPendingFiles();
+        }
+
+        // Acrescenta arquivos à pendência (seleção múltipla ou cliques
+        // sucessivos no clipe). Imagens aqui entram como arquivo original.
+        private void AddPendingFiles(string[] caminhos)
+        {
+            if (caminhos == null) return;
+            int added = 0;
+            foreach (string caminho in caminhos)
+            {
+                if (String.IsNullOrEmpty(caminho)) continue;
+                byte[] bytes;
+                try
+                {
+                    bytes = File.ReadAllBytes(caminho);
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível ler " +
+                        Path.GetFileName(caminho) + ": " + error.Message,
+                        "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+                if (bytes.Length == 0)
+                {
+                    MessageBox.Show(this, "Ignorado (vazio): " + Path.GetFileName(caminho),
+                        "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    continue;
+                }
+                PendingFile entry = new PendingFile();
+                entry.Name = Path.GetFileName(caminho);
+                entry.Bytes = bytes;
+                pendingFiles.Add(entry);
+                added++;
+            }
+            if (added == 0) return;
+            ShowPendingFiles();
+            statusLabel.ForeColor = Color.FromArgb(21, 128, 61);
+            statusLabel.Text = pendingFiles.Count == 1
+                ? "1 arquivo anexado. Clique em Enviar."
+                : (pendingFiles.Count + " arquivos anexados. Clique em Enviar.");
+        }
+
+        // Prévia dos arquivos: clipe com selo "xN" quando houver 2+.
+        private void ShowPendingFiles()
+        {
+            if (pendingFiles.Count == 0)
+            {
+                ClearPendingImage();
+                return;
+            }
+            ClearPendingImageThumbnail();
             imagePreviewBox.Image = AppResources.AudioIconClip();
             imagePreviewLabel.ForeColor = Color.FromArgb(31, 41, 55);
-            imagePreviewLabel.Text = "Arquivo anexado: " + pendingFileName + " — " +
-                ImageTransfer.DescribeBytes(bytes.Length);
+            if (pendingFiles.Count == 1)
+            {
+                imagePreviewLabel.Text = "Arquivo anexado: " + pendingFiles[0].Name + " — " +
+                    ImageTransfer.DescribeBytes(pendingFiles[0].Bytes.Length);
+            }
+            else
+            {
+                imagePreviewLabel.Text = pendingFiles.Count + " arquivos anexados: " +
+                    ShortFileList(pendingFiles) + " — " +
+                    ImageTransfer.DescribeBytes(TotalPendingBytes()) + " (zip no envio)";
+            }
             ShowImagePreview(true);
             UpdateActionStates();
+            RefreshZipButton();
+        }
+
+        private static string ShortFileList(List<PendingFile> files)
+        {
+            StringBuilder text = new StringBuilder();
+            int shown = Math.Min(3, files.Count);
+            for (int index = 0; index < shown; index++)
+            {
+                if (index > 0) text.Append(", ");
+                text.Append(files[index] == null ? "" : (files[index].Name ?? ""));
+            }
+            if (files.Count > shown)
+            {
+                text.Append(" e mais " + (files.Count - shown));
+            }
+            return text.ToString();
+        }
+
+        private long TotalPendingBytes()
+        {
+            long total = 0;
+            foreach (PendingFile file in pendingFiles)
+            {
+                total += file == null || file.Bytes == null ? 0 : file.Bytes.Length;
+            }
+            return total;
+        }
+
+        // Botão do zip (canto inferior esquerdo, na altura dos microfones):
+        // só aparece com 2+ arquivos pendentes. O clipe ganha o selo "xN".
+        private void RefreshZipButton()
+        {
+            int count = pendingFiles == null ? 0 : pendingFiles.Count;
+            if (zipButton != null)
+            {
+                zipButton.Visible = count > 1;
+            }
+            UpdateZipMenu();
+            if (clipButton != null)
+            {
+                clipButton.BadgeText = count > 1
+                    ? ("x" + count.ToString(CultureInfo.InvariantCulture)) : "";
+            }
+            RefreshPreviewBadge();
+        }
+
+        private void UpdateZipMenu()
+        {
+            if (zipMenu == null) return;
+            if (zipButton != null)
+            {
+                zipButton.Text = "Zip " + zipCompressionLevel;
+            }
+            if (zipRegularFont == null || zipSelectedFont == null) return;
+            foreach (ToolStripItem item in zipMenu.Items)
+            {
+                ToolStripMenuItem option = item as ToolStripMenuItem;
+                if (option == null) continue;
+                int level;
+                bool selected = Int32.TryParse(option.Text, out level) &&
+                    level == zipCompressionLevel;
+                option.Font = selected ? zipSelectedFont : zipRegularFont;
+            }
+        }
+
+        private void ZipButtonClick(object sender, EventArgs e)
+        {
+            if (zipMenu == null || zipButton == null) return;
+            UpdateZipMenu();
+            Size menuSize = zipMenu.GetPreferredSize(new Size(zipButton.Width, 0));
+            zipMenu.Show(zipButton, new Point(0, -menuSize.Height));
+        }
+
+        // Selo "xN" sobre o ícone da prévia do anexo (PictureBox 56x56).
+        private void RefreshPreviewBadge()
+        {
+            if (imagePreviewBadge == null || imagePreviewBox == null) return;
+            int count = pendingFiles == null ? 0 : pendingFiles.Count;
+            if (count > 1)
+            {
+                imagePreviewBadge.Text = "x" + count.ToString(CultureInfo.InvariantCulture);
+                imagePreviewBadge.Visible = true;
+                PositionPreviewBadge();
+            }
+            else
+            {
+                imagePreviewBadge.Visible = false;
+            }
+        }
+
+        private void PositionPreviewBadge()
+        {
+            if (imagePreviewBadge == null || imagePreviewBox == null) return;
+            imagePreviewBadge.Location = new Point(
+                Math.Max(0, imagePreviewBox.ClientSize.Width - imagePreviewBadge.Width - 2),
+                Math.Max(0, imagePreviewBox.ClientSize.Height - imagePreviewBadge.Height - 2));
         }
 
         private void SetPendingImage(ImagePayload image)
@@ -3247,16 +3484,33 @@ namespace TailMsg
 
             ShowImagePreview(true);
             UpdateActionStates();
+            RefreshZipButton();
         }
 
         private void ClearPendingImage()
         {
             pendingImage = null;
-            pendingFileBytes = null;
-            pendingFileName = "";
+            if (pendingFiles != null) pendingFiles.Clear();
             ClearPendingImageThumbnail();
             ShowImagePreview(false);
             UpdateActionStates();
+            RefreshZipButton();
+        }
+
+        // Limpa só os arquivos (o envio os levou); a imagem pendente, se
+        // houver, volta para a prévia em vez de sumir junto.
+        private void ClearPendingFiles()
+        {
+            if (pendingFiles != null) pendingFiles.Clear();
+            if (pendingImage != null)
+            {
+                SetPendingImage(pendingImage);
+            }
+            else
+            {
+                ClearPendingImage();
+            }
+            RefreshZipButton();
         }
 
         private void ClearPendingImageThumbnail()
@@ -3993,8 +4247,8 @@ namespace TailMsg
             string message = messageBoxIsTranscription ? "" : messageBox.Text.Trim();
             ImagePayload image = pendingImage;
             AudioPayload audio = pendingAudio;
-            byte[] fileBytes = pendingFileBytes;
-            string fileName = pendingFileName;
+            List<PendingFile> files = new List<PendingFile>(pendingFiles);
+            int zipLevel = zipCompressionLevel;
 
             if (targets.Count == 0)
             {
@@ -4003,9 +4257,9 @@ namespace TailMsg
                 return;
             }
 
-            if (String.IsNullOrEmpty(message) && image == null && audio == null && fileBytes == null)
+            if (String.IsNullOrEmpty(message) && image == null && audio == null && files.Count == 0)
             {
-                MessageBox.Show(this, "Digite a mensagem, cole uma imagem com Ctrl+V ou grave um áudio.",
+                MessageBox.Show(this, "Digite a mensagem, anexe um arquivo com o clipe, cole uma imagem com Ctrl+V ou grave um áudio.",
                     "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 messageBox.Focus();
                 return;
@@ -4060,9 +4314,34 @@ namespace TailMsg
                 bool sentText = false;
                 bool sentImage = false;
                 bool sentAudio = false;
+                bool sentFile = false;
                 string failure = "";
                 List<Action> registros = new List<Action>();
                 object sync = new object();
+
+                // 1 arquivo vai direto; 2+ vão num zip (nível do botão do
+                // rodapé). O pacote é montado uma vez, aqui em segundo plano.
+                byte[] filePayloadBytes = null;
+                string filePayloadName = "";
+                int filePayloadCount = files.Count;
+                string filePayloadNames = FileZipBundle.JoinNames(files);
+                if (files.Count == 1)
+                {
+                    filePayloadName = files[0].Name;
+                    filePayloadBytes = files[0].Bytes;
+                }
+                else if (files.Count > 1)
+                {
+                    filePayloadName = FileZipBundle.BundleFileName(files.Count);
+                    try
+                    {
+                        filePayloadBytes = FileZipBundle.Create(files, zipLevel);
+                    }
+                    catch (Exception zipError)
+                    {
+                        failure = "Não foi possível compactar os arquivos: " + zipError.Message;
+                    }
+                }
 
                 int pendentes = recipients.Count;
                 using (ManualResetEvent conclusao = new ManualResetEvent(false))
@@ -4130,10 +4409,10 @@ namespace TailMsg
                                     }
                                 }
 
-                                if (fileBytes != null)
+                                if (filePayloadBytes != null)
                                 {
                                     MessageSendResult fileResult = MessageSender.SendFile(
-                                        alvo, localComputerName, fileName, fileBytes, null);
+                                        alvo, localComputerName, filePayloadName, filePayloadBytes, null);
                                     if (fileResult.Success)
                                     {
                                         fileId = fileResult.OperationId;
@@ -4162,6 +4441,7 @@ namespace TailMsg
                                         if (entregouTexto) sentText = true;
                                         if (entregouImagem) sentImage = true;
                                         if (entregouAudio) sentAudio = true;
+                                        if (entregouArquivo) sentFile = true;
                                         // O histórico é interface: aplica depois,
                                         // na thread da UI, dentro do TryBeginInvoke.
                                         registros.Add(delegate
@@ -4171,7 +4451,8 @@ namespace TailMsg
                                                 entregouTexto, textoId, message,
                                                 entregouImagem, imagemId, image,
                                                 entregouAudio, audioIdRegistro, audio,
-                                                entregouArquivo, arquivoId, fileBytes, fileName);
+                                                entregouArquivo, arquivoId, filePayloadBytes, filePayloadName,
+                                                filePayloadCount, filePayloadNames);
                                         });
                                     }
                                 }
@@ -4206,6 +4487,9 @@ namespace TailMsg
                     // sem querer em uma nova tentativa.
                     if (sentText) messageBox.Clear();
                     if (sentImage) ClearPendingImage();
+                    // Arquivo entregue sai junto; sem imagem junto, a imagem
+                    // pendente (se houver) volta para a prévia.
+                    if (sentFile && !sentImage) ClearPendingFiles();
                     if (sentAudio)
                     {
                         ClearPendingAudio();
@@ -4223,7 +4507,9 @@ namespace TailMsg
                             DescribeTargets(recipients),
                             sentText,
                             sentImage,
-                            sentAudio);
+                            sentAudio,
+                            sentFile,
+                            filePayloadCount);
                         messageBox.Focus();
                     }
                     else
@@ -4253,7 +4539,8 @@ namespace TailMsg
             bool sentText, string textId, string text,
             bool sentImage, string imageId, ImagePayload image,
             bool sentAudio, string audioId, AudioPayload audio,
-            bool sentFile, string fileId, byte[] fileBytes, string fileName)
+            bool sentFile, string fileId, byte[] fileBytes, string fileName,
+            int fileCount, string fileNames)
         {
             string stamp = DateTime.Now.ToString("HH:mm");
             string who = computer == null ? "?" : computer.Name;
@@ -4277,9 +4564,10 @@ namespace TailMsg
 
             if (sentFile && fileBytes != null)
             {
+                bool bundle = fileCount > 1;
                 string arquivo = HistoryStore.SaveMedia(
                     fileBytes,
-                    Path.GetExtension(fileName));
+                    bundle ? ".zip" : Path.GetExtension(fileName));
                 long seq = HistoryStore.Append(new HistoryEntry
                 {
                     Kind = "sent-file",
@@ -4288,18 +4576,24 @@ namespace TailMsg
                     Address = address,
                     Size = fileBytes.Length,
                     FileName = arquivo,
-                    // Nome original do arquivo (o menu e o "salvar como" usam).
-                    Text = fileName ?? "",
+                    // Nome original (único) ou nomes do pacote separados por
+                    // "\n" (o menu e o "salvar como" usam).
+                    Text = bundle ? (fileNames ?? "") : (fileName ?? ""),
                     OperationId = fileId
                 });
                 InboxImageRow row = inboxBox.AppendImage(
                     who,
-                    "(" + ImageTransfer.DescribeBytes(fileBytes.Length) + ")",
+                    bundle
+                        ? ("(" + fileCount + " arquivos, " +
+                            ImageTransfer.DescribeBytes(fileBytes.Length) + ")")
+                        : ("(" + ImageTransfer.DescribeBytes(fileBytes.Length) + ")"),
                     stamp,
                     fileBytes,
                     null,
                     true,
-                    fileName);
+                    bundle ? FileZipBundle.BundleFileName(fileCount) : fileName,
+                    bundle ? fileCount : 1,
+                    bundle ? (fileNames ?? "") : "");
                 row.Address = address;
                 row.Seq = seq;
                 row.OperationId = fileId;
@@ -4378,23 +4672,41 @@ namespace TailMsg
             string computerName,
             bool sentText,
             bool sentImage,
-            bool sentAudio)
+            bool sentAudio,
+            bool sentFile,
+            int fileCount)
         {
-            int attachments = (sentImage ? 1 : 0) + (sentAudio ? 1 : 0);
+            int attachments = (sentImage ? 1 : 0) + (sentAudio ? 1 : 0) +
+                (sentFile ? 1 : 0);
             if (!sentText && attachments == 0)
             {
                 return "Nada foi enviado para " + computerName + ".";
             }
             if (!sentText && attachments == 1)
             {
-                return (sentImage ? "Imagem entregue a " : "Áudio entregue a ") +
-                    computerName + ".";
+                if (sentImage)
+                {
+                    return "Imagem entregue a " + computerName + ".";
+                }
+                if (sentAudio)
+                {
+                    return "Áudio entregue a " + computerName + ".";
+                }
+                return fileCount > 1
+                    ? (fileCount + " arquivos entregues a " + computerName + ".")
+                    : ("Arquivo entregue a " + computerName + ".");
             }
 
             StringBuilder text = new StringBuilder();
             if (sentText) text.Append("Mensagem");
             if (sentImage) text.Append(text.Length == 0 ? "Imagem" : " e imagem");
             if (sentAudio) text.Append(text.Length == 0 ? "Áudio" : " e áudio");
+            if (sentFile)
+            {
+                string arquivo = fileCount > 1
+                    ? (fileCount + " arquivos") : "Arquivo";
+                text.Append(text.Length == 0 ? arquivo : " e " + arquivo.ToLowerInvariant());
+            }
             text.Append(" entregue");
             if (sentText && attachments > 0) text.Append("s");
             text.Append(" a ").Append(computerName).Append(".");
@@ -4527,7 +4839,30 @@ namespace TailMsg
                 string imageStamp = DateTime.Now.ToString("HH:mm");
                 long imageSize = e.ImageBytes == null ? 0 : e.ImageBytes.Length;
                 bool ehArquivo = !String.IsNullOrEmpty(e.FileName);
-                string imageBody = "(" + ImageTransfer.DescribeBytes(imageSize) + ")";
+                // Pacote transparente (zip com 2+): o clipe ganha o selo "xN"
+                // e o "salvar como" descompacta na pasta escolhida.
+                int bundleCount = 0;
+                string bundleNames = "";
+                if (ehArquivo)
+                {
+                    bundleCount = FileZipBundle.DetectBundle(e.FileName, e.ImageBytes);
+                    if (bundleCount > 1)
+                    {
+                        List<FileZipBundle.ZipEntry> bundleEntries;
+                        if (FileZipBundle.TryRead(e.ImageBytes, out bundleEntries))
+                        {
+                            bundleNames = FileZipBundle.JoinEntryNames(bundleEntries);
+                        }
+                        else
+                        {
+                            bundleCount = 0;
+                        }
+                    }
+                }
+                string imageBody = bundleCount > 1
+                    ? ("(" + bundleCount + " arquivos, " +
+                        ImageTransfer.DescribeBytes(imageSize) + ")")
+                    : ("(" + ImageTransfer.DescribeBytes(imageSize) + ")");
                 // Arquivo recebido fica com a extensão original (antes um PDF
                 // virava ".png" e o visualizador acusava "imagem corrompida")
                 // e entra no histórico como arquivo, não como imagem.
@@ -4542,8 +4877,9 @@ namespace TailMsg
                     Address = e.RemoteAddress,
                     Size = imageSize,
                     FileName = imageFile,
-                    // Nome original do arquivo (o menu e o "salvar como" usam).
-                    Text = ehArquivo ? (e.FileName ?? "") : "",
+                    // Nome original (único) ou nomes do pacote separados por
+                    // "\n" (o menu e o "salvar como" usam).
+                    Text = bundleCount > 1 ? bundleNames : (ehArquivo ? (e.FileName ?? "") : ""),
                     OperationId = e.OperationId
                 });
                 InboxImageRow receivedImageRow = inboxBox.AppendImage(
@@ -4553,7 +4889,9 @@ namespace TailMsg
                     e.ImageBytes,
                     HistoryStore.MediaPath(imageFile),
                     ehArquivo,
-                    ehArquivo ? e.FileName : "");
+                    ehArquivo ? e.FileName : "",
+                    bundleCount > 1 ? bundleCount : 1,
+                    bundleNames);
                 receivedImageRow.Address = e.RemoteAddress;
                 receivedImageRow.Seq = imageSeq;
                 receivedImageRow.OperationId = e.OperationId;
@@ -5009,14 +5347,8 @@ namespace TailMsg
                     isImage = false;
                     isFile = true;
                 }
-                InboxImageRow row = inboxBox.AppendImage(
-                    entry.Sender,
-                    "(" + ImageTransfer.DescribeBytes(entry.Size) + ")",
-                    entry.Time,
-                    conteudo,
-                    exists ? path : null,
-                    isFile,
-                    isFile ? NomeDoArquivoDaEntrada(entry, conteudo) : "");
+                InboxImageRow row = AppendHistoryImageRow(
+                    entry, sent, conteudo, exists ? path : null, isFile);
                 row.Address = entry.Address;
                 row.Seq = entry.Seq;
                 row.OperationId = entry.OperationId;
@@ -5047,6 +5379,40 @@ namespace TailMsg
             // Guarda o alvo para transcrições que ainda cheguem (ex.: a
             // janelinha fechou antes de o serviço responder).
             TranscriptionCache.RegisterTarget(entry.OperationId, entry.Seq, audioRow);
+        }
+
+        // Linha de imagem/arquivo do histórico: pacote (Text com os nomes
+        // separados por "\n") vira clipe com "xN"; o resto segue igual.
+        private InboxImageRow AppendHistoryImageRow(
+            HistoryEntry entry, bool sent, byte[] conteudo, string path, bool isFile)
+        {
+            int bundleCount = 1;
+            string bundleNames = "";
+            string displayName = isFile ? NomeDoArquivoDaEntrada(entry, conteudo) : "";
+            if (isFile && !String.IsNullOrEmpty(entry.Text) && entry.Text.Contains("\n"))
+            {
+                string[] parts = entry.Text.Split(new char[] { '\n' });
+                if (parts.Length > 1)
+                {
+                    bundleCount = parts.Length;
+                    bundleNames = entry.Text;
+                    displayName = FileZipBundle.BundleFileName(parts.Length);
+                }
+            }
+            string body = bundleCount > 1
+                ? ("(" + bundleCount + " arquivos, " +
+                    ImageTransfer.DescribeBytes(entry.Size) + ")")
+                : ("(" + ImageTransfer.DescribeBytes(entry.Size) + ")");
+            return inboxBox.AppendImage(
+                entry.Sender,
+                body,
+                entry.Time,
+                conteudo,
+                path,
+                isFile,
+                displayName,
+                bundleCount,
+                bundleNames);
         }
 
         private void RepositionNotifications()
@@ -5127,10 +5493,13 @@ namespace TailMsg
         private readonly MessageTextBox replyBox;
         private readonly Button copyButton;
         private readonly Button replyButton;
-        private readonly Button transparencyButton;
-        private readonly ContextMenuStrip transparencyMenu;
-        private readonly Font transparencyRegularFont;
-        private readonly Font transparencySelectedFont;
+        // Nível de compactação do zip (0-9, 1 = padrão): no lugar do antigo
+        // seletor de transparência (removido; a janelinha fica sempre opaca).
+        // Só aparece com 2+ arquivos pendentes na resposta.
+        private readonly Button replyZipButton;
+        private readonly ContextMenuStrip replyZipMenu;
+        private readonly Font replyZipRegularFont;
+        private readonly Font replyZipSelectedFont;
         private readonly Bitmap imageThumbnail;
         private readonly string imageThumbnailError;
         private Panel replyAttachmentBorder;
@@ -5139,10 +5508,14 @@ namespace TailMsg
         private Label replyLabel;
         private Bitmap replyAttachmentThumbnail;
         private ImagePayload pendingReplyImage;
-        private byte[] replyPendingFileBytes;
-        private string replyPendingFileName;
+        // Arquivos pendentes da resposta: 1 = envio direto, 2+ = zip
+        // transparente (nível em replyZipLevel).
+        private List<PendingFile> replyPendingFiles = new List<PendingFile>();
+        private int replyZipLevel = 1;
+        private Label replyBadge;
+        private Label popupBundleBadge;
         private int baseReplyButtonTop;
-        private int baseTransparencyButtonTop;
+        private int baseReplyZipButtonTop;
         private int basePopupHeight;
         private bool replySupportsImages;
         private bool replySupportsAudio;
@@ -5191,11 +5564,19 @@ namespace TailMsg
         // Consulta de capacidade do remetente, fornecida pela janela
         // principal. Sem ela, o anexo na resposta seria recusado sempre.
         // Arquivo recebido: grava os bytes onde o usuário escolher.
+        // Pacote (zip transparente com 2+): descompacta na pasta escolhida.
         private void SaveReceivedFile()
         {
             if (imageMessage == null || imageMessage.ImageBytes == null ||
                 imageMessage.ImageBytes.Length == 0)
             {
+                return;
+            }
+
+            if (!String.IsNullOrEmpty(imageMessage.FileName) &&
+                FileZipBundle.DetectBundle(imageMessage.FileName, imageMessage.ImageBytes) > 1)
+            {
+                SaveReceivedBundle();
                 return;
             }
 
@@ -5216,6 +5597,36 @@ namespace TailMsg
                     MessageBox.Show(this, "Não foi possível salvar: " + error.Message,
                         "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
+            }
+        }
+
+        // Pacote recebido: escolhe a pasta e descompacta tudo lá.
+        private void SaveReceivedBundle()
+        {
+            List<FileZipBundle.ZipEntry> entries;
+            if (!FileZipBundle.TryRead(imageMessage.ImageBytes, out entries) ||
+                entries.Count == 0)
+            {
+                MessageBox.Show(this, "Não foi possível abrir o pacote de arquivos.",
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+            {
+                dialog.Description = "Escolher a pasta para salvar os " +
+                    entries.Count + " arquivos";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                int saved;
+                string error;
+                if (!FileZipBundle.TryExtractToFolder(
+                    entries, dialog.SelectedPath, out saved, out error))
+                {
+                    MessageBox.Show(this, "Não foi possível salvar: " + error,
+                        "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                MessageBox.Show(this, saved + " arquivos salvos em " + dialog.SelectedPath,
+                    "TailMsg", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
 
@@ -5306,6 +5717,9 @@ namespace TailMsg
             ShowInTaskbar = false;
             ShowIcon = false;
             TopMost = true;
+            // Sem seletor de transparência: a janelinha fica sempre opaca.
+            NotificationSettings.SetTransparencyPercent(
+                NotificationSettings.MinimumTransparencyPercent);
             Opacity = NotificationSettings.WindowOpacity;
             Font = new Font("Segoe UI", 9F);
 
@@ -5446,6 +5860,18 @@ namespace TailMsg
                     pictureBox.Cursor = Cursors.Hand;
                     pictureBox.Click += delegate { SaveReceivedFile(); };
                 }
+                // Pacote (zip transparente com 2+): selo "xN" sobre o clipe.
+                int receivedCount = image != null && !String.IsNullOrEmpty(image.FileName)
+                    ? FileZipBundle.DetectBundle(image.FileName, image.ImageBytes)
+                    : 0;
+                if (receivedCount > 1)
+                {
+                    popupBundleBadge = MakeBadgeLabel("x" + receivedCount);
+                    popupBundleBadge.Click += delegate { SaveReceivedFile(); };
+                    pictureBox.Controls.Add(popupBundleBadge);
+                    pictureBox.Resize += delegate { PositionPopupBadge(); };
+                    PositionPopupBadge();
+                }
                 imageBorder.Controls.Add(pictureBox);
 
                 if (!String.IsNullOrEmpty(imageThumbnailError))
@@ -5524,6 +5950,13 @@ namespace TailMsg
             replyAttachmentBox.BackColor = Color.FromArgb(243, 244, 246);
             replyAttachmentInner.Controls.Add(replyAttachmentBox);
 
+            // Selo "xN" sobre o clipe do anexo quando houver 2+ arquivos.
+            replyBadge = MakeBadgeLabel("x2");
+            replyBadge.Visible = false;
+            replyBadge.Cursor = Cursors.Default;
+            replyAttachmentBox.Controls.Add(replyBadge);
+            replyAttachmentBox.Resize += delegate { PositionReplyBadge(); };
+
             replyAttachmentLabel = new Label();
             replyAttachmentLabel.AutoSize = false;
             replyAttachmentLabel.Location = new Point(58, 2);
@@ -5571,45 +6004,47 @@ namespace TailMsg
             replyButton.Click += ReplyButtonClick;
             body.Controls.Add(replyButton);
 
-            transparencyMenu = new ContextMenuStrip();
-            transparencyMenu.AutoSize = false;
-            transparencyMenu.ShowCheckMargin = false;
-            transparencyMenu.ShowImageMargin = false;
-            transparencyRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular);
-            transparencySelectedFont = new Font("Segoe UI", 9F, FontStyle.Bold);
-            for (int percent = NotificationSettings.MinimumTransparencyPercent;
-                 percent <= NotificationSettings.MaximumTransparencyPercent;
-                 percent += 10)
+            // Nível de compactação do zip (0-9, 1 = padrão), no lugar do
+            // antigo seletor de transparência. Só aparece com 2+ arquivos.
+            replyZipMenu = new ContextMenuStrip();
+            replyZipMenu.AutoSize = false;
+            replyZipMenu.ShowCheckMargin = false;
+            replyZipMenu.ShowImageMargin = false;
+            replyZipRegularFont = new Font("Segoe UI", 9F, FontStyle.Regular);
+            replyZipSelectedFont = new Font("Segoe UI", 9F, FontStyle.Bold);
+            for (int zipOption = 0; zipOption <= 9; zipOption++)
             {
-                int selectedPercent = percent;
-                ToolStripMenuItem option = new ToolStripMenuItem(percent + "%");
+                int zipOptionLevel = zipOption;
+                ToolStripMenuItem option = new ToolStripMenuItem(
+                    zipOption.ToString(CultureInfo.InvariantCulture));
                 option.AutoSize = false;
                 option.Height = 22;
-                option.Width = 40;
+                option.Width = 52;
                 option.Click += delegate
                 {
-                    NotificationSettings.SetTransparencyPercent(selectedPercent);
-                    UpdateTransparencyMenu();
-                    ApplyTransparency();
+                    replyZipLevel = zipOptionLevel;
+                    UpdateReplyZipMenu();
                 };
-                transparencyMenu.Items.Add(option);
+                replyZipMenu.Items.Add(option);
             }
 
-            transparencyButton = new Button();
-            transparencyButton.Text = NotificationSettings.TransparencyPercent + "%";
-            transparencyButton.Size = new Size(40, 22);
-            transparencyButton.Location = new Point(5, hasAudio ? 279 : 221);
-            transparencyButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-            transparencyButton.BackColor = Color.FromArgb(55, 65, 81);
-            transparencyButton.ForeColor = Color.White;
-            transparencyButton.FlatStyle = FlatStyle.Flat;
-            transparencyButton.FlatAppearance.BorderSize = 0;
-            transparencyButton.Cursor = Cursors.Hand;
-            transparencyButton.Click += TransparencyButtonClick;
-            transparencyMenu.Width = transparencyButton.Width;
-            transparencyMenu.Height =
-                (transparencyMenu.Items.Count * transparencyButton.Height) + 4;
-            body.Controls.Add(transparencyButton);
+            replyZipButton = new Button();
+            replyZipButton.Text = "Zip 1";
+            replyZipButton.Size = new Size(52, 22);
+            replyZipButton.Location = new Point(5, hasAudio ? 279 : 221);
+            replyZipButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            replyZipButton.BackColor = Color.FromArgb(55, 65, 81);
+            replyZipButton.ForeColor = Color.White;
+            replyZipButton.FlatStyle = FlatStyle.Flat;
+            replyZipButton.FlatAppearance.BorderSize = 0;
+            replyZipButton.Cursor = Cursors.Hand;
+            replyZipButton.AccessibleName = "Nível de compactação do zip (0 a 9)";
+            replyZipButton.Click += ReplyZipButtonClick;
+            replyZipMenu.Width = replyZipButton.Width;
+            replyZipMenu.Height =
+                (replyZipMenu.Items.Count * replyZipButton.Height) + 4;
+            replyZipButton.Visible = false;
+            body.Controls.Add(replyZipButton);
 
             copyButton = new Button();
             copyButton.Text = "Copiar";
@@ -5681,10 +6116,57 @@ namespace TailMsg
             if (hasAudio) StartTranscription();
 
             baseReplyButtonTop = replyButton.Top;
-            baseTransparencyButtonTop = transparencyButton.Top;
+            baseReplyZipButtonTop = replyZipButton.Top;
             basePopupHeight = ClientSize.Height;
             RefreshReplyCapability();
             ApplyReplyLayout();
+        }
+
+        // Selo "xN" (Label escura sobre o clipe da PictureBox).
+        private static Label MakeBadgeLabel(string text)
+        {
+            Label badge = new Label();
+            badge.AutoSize = true;
+            badge.Font = new Font("Segoe UI", 8F, FontStyle.Bold);
+            badge.BackColor = Color.FromArgb(31, 41, 55);
+            badge.ForeColor = Color.White;
+            badge.Text = text;
+            badge.Cursor = Cursors.Hand;
+            return badge;
+        }
+
+        private void PositionPopupBadge()
+        {
+            Control parent = popupBundleBadge == null ? null : popupBundleBadge.Parent;
+            if (popupBundleBadge == null || parent == null) return;
+            popupBundleBadge.Location = new Point(
+                Math.Max(0, parent.ClientSize.Width - popupBundleBadge.Width - 4),
+                Math.Max(0, parent.ClientSize.Height - popupBundleBadge.Height - 4));
+        }
+
+        // Selo "xN" sobre o clipe do anexo da resposta (PictureBox 48x48).
+        private void RefreshReplyBadge()
+        {
+            if (replyBadge == null || replyAttachmentBox == null) return;
+            int count = replyPendingFiles == null ? 0 : replyPendingFiles.Count;
+            if (count > 1)
+            {
+                replyBadge.Text = "x" + count.ToString(CultureInfo.InvariantCulture);
+                replyBadge.Visible = true;
+                PositionReplyBadge();
+            }
+            else
+            {
+                replyBadge.Visible = false;
+            }
+        }
+
+        private void PositionReplyBadge()
+        {
+            if (replyBadge == null || replyAttachmentBox == null) return;
+            replyBadge.Location = new Point(
+                Math.Max(0, replyAttachmentBox.ClientSize.Width - replyBadge.Width - 2),
+                Math.Max(0, replyAttachmentBox.ClientSize.Height - replyBadge.Height - 2));
         }
 
         // Atualiza se o remetente aceita imagens: quem nos enviou uma imagem
@@ -5830,7 +6312,9 @@ namespace TailMsg
 
         }
 
-        // Anexar arquivo na resposta (imagens e arquivos).
+        // Anexar arquivo na resposta: permite vários de uma vez ou
+        // acrescentar um depois (cada escolha acumula). Uma única imagem, sem
+        // pendência, entra como imagem; o resto acumula como arquivo.
         private void AttachReplyFileFromClip()
         {
             using (OpenFileDialog dialog = new OpenFileDialog())
@@ -5838,20 +6322,28 @@ namespace TailMsg
                 dialog.Title = "Anexar arquivo";
                 dialog.Filter = "Todos os arquivos|*.*|" +
                     "Imagens|*.png;*.jpg;*.jpeg;*.bmp;*.gif";
+                dialog.Multiselect = true;
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                if (dialog.FileNames == null || dialog.FileNames.Length == 0) return;
 
-                string extensao = Path.GetExtension(dialog.FileName).ToLowerInvariant();
+                if (dialog.FileNames.Length > 1 || replyPendingFiles.Count > 0)
+                {
+                    AddReplyFiles(dialog.FileNames);
+                    return;
+                }
+
+                string extensao = Path.GetExtension(dialog.FileNames[0]).ToLowerInvariant();
                 bool ehImagem = extensao == ".png" || extensao == ".jpg" ||
                     extensao == ".jpeg" || extensao == ".bmp" || extensao == ".gif";
                 if (!ehImagem)
                 {
-                    SetReplyAttachmentFile(dialog.FileName);
+                    SetReplyAttachmentFile(dialog.FileNames[0]);
                     return;
                 }
 
                 try
                 {
-                    using (Image origem = Image.FromFile(dialog.FileName))
+                    using (Image origem = Image.FromFile(dialog.FileNames[0]))
                     using (Bitmap copia = new Bitmap(origem))
                     using (MemoryStream buffer = new MemoryStream())
                     {
@@ -5902,14 +6394,98 @@ namespace TailMsg
                 return;
             }
 
+            replyPendingFiles.Clear();
+            PendingFile entry = new PendingFile();
+            entry.Name = Path.GetFileName(caminho);
+            entry.Bytes = bytes;
+            replyPendingFiles.Add(entry);
+            ShowReplyFiles();
+        }
+
+        // Acrescenta arquivos à resposta (seleção múltipla ou cliques
+        // sucessivos no clipe da resposta).
+        private void AddReplyFiles(string[] caminhos)
+        {
+            if (caminhos == null) return;
+            int added = 0;
+            foreach (string caminho in caminhos)
+            {
+                if (String.IsNullOrEmpty(caminho)) continue;
+                byte[] bytes;
+                try
+                {
+                    bytes = File.ReadAllBytes(caminho);
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, "Não foi possível ler " +
+                        Path.GetFileName(caminho) + ": " + error.Message,
+                        "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+                if (bytes.Length == 0)
+                {
+                    MessageBox.Show(this, "Ignorado (vazio): " + Path.GetFileName(caminho),
+                        "Anexar arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    continue;
+                }
+                PendingFile entry = new PendingFile();
+                entry.Name = Path.GetFileName(caminho);
+                entry.Bytes = bytes;
+                replyPendingFiles.Add(entry);
+                added++;
+            }
+            if (added == 0) return;
+            ShowReplyFiles();
+        }
+
+        // Faixa do anexo da resposta para arquivos: clipe com selo "xN".
+        private void ShowReplyFiles()
+        {
             RefreshReplyCapability();
             ClearReplyAttachmentThumbnail();
-            replyPendingFileBytes = bytes;
-            replyPendingFileName = Path.GetFileName(caminho);
             replyAttachmentBox.Image = AppResources.AudioIconClip();
-            replyAttachmentLabel.Text = "Anexo: " + replyPendingFileName + " — " +
-                ImageTransfer.DescribeBytes(bytes.Length);
+            if (replyPendingFiles.Count == 1)
+            {
+                PendingFile only = replyPendingFiles[0];
+                long size = only == null || only.Bytes == null ? 0 : only.Bytes.Length;
+                replyAttachmentLabel.Text = "Anexo: " + (only == null ? "" : (only.Name ?? "")) +
+                    " — " + ImageTransfer.DescribeBytes(size);
+            }
+            else
+            {
+                replyAttachmentLabel.Text = replyPendingFiles.Count + " anexos: " +
+                    ShortReplyFileList() + " — " +
+                    ImageTransfer.DescribeBytes(TotalReplyBytes()) + " (zip no envio)";
+            }
             ApplyReplyLayout();
+        }
+
+        private string ShortReplyFileList()
+        {
+            StringBuilder text = new StringBuilder();
+            int shown = Math.Min(3, replyPendingFiles.Count);
+            for (int index = 0; index < shown; index++)
+            {
+                if (index > 0) text.Append(", ");
+                PendingFile file = replyPendingFiles[index];
+                text.Append(file == null ? "" : (file.Name ?? ""));
+            }
+            if (replyPendingFiles.Count > shown)
+            {
+                text.Append(" e mais " + (replyPendingFiles.Count - shown));
+            }
+            return text.ToString();
+        }
+
+        private long TotalReplyBytes()
+        {
+            long total = 0;
+            foreach (PendingFile file in replyPendingFiles)
+            {
+                total += file == null || file.Bytes == null ? 0 : file.Bytes.Length;
+            }
+            return total;
         }
 
         private void SetReplyAttachment(ImagePayload image)
@@ -5946,8 +6522,7 @@ namespace TailMsg
         private void ClearReplyAttachment()
         {
             pendingReplyImage = null;
-            replyPendingFileBytes = null;
-            replyPendingFileName = "";
+            if (replyPendingFiles != null) replyPendingFiles.Clear();
             ClearReplyAttachmentThumbnail();
             ApplyReplyLayout();
         }
@@ -6476,7 +7051,7 @@ namespace TailMsg
         }
 
         // A faixa de anexos cresce conforme o que estiver anexado (imagem e/ou
-        // áudio) e a linha de botões (Enviar, transparência e os três de áudio)
+        // áudio) e a linha de botões (Enviar, zip e os três de áudio)
         // desce para DEPOIS das faixas — antes ela caía na mesma área e o painel
         // do anexo (adicionado depois, no topo do z-order) engolia os cliques.
         private void ApplyReplyLayout()
@@ -6484,7 +7059,7 @@ namespace TailMsg
             if (replyBox == null) return;
 
             int top = replyBox.Bottom + 6;
-            if (pendingReplyImage != null || replyPendingFileBytes != null)
+            if (pendingReplyImage != null || replyPendingFiles.Count > 0)
             {
                 replyAttachmentBorder.Location = new Point(5, top);
                 replyAttachmentBorder.Visible = true;
@@ -6510,10 +7085,21 @@ namespace TailMsg
 
             int toolsTop = top + 3;
             replyButton.Top = toolsTop;
-            transparencyButton.Top = toolsTop;
+            replyZipButton.Top = toolsTop;
             replyMicButton.Top = toolsTop;
             replyPauseButton.Top = toolsTop;
             replyLiveMicButton.Top = toolsTop;
+
+            // O botão do zip só aparece com 2+ arquivos; o clipe ganha o selo.
+            replyZipButton.Visible = replyPendingFiles.Count > 1;
+            UpdateReplyZipMenu();
+            RefreshReplyBadge();
+            if (replyClipButton != null)
+            {
+                replyClipButton.BadgeText = replyPendingFiles.Count > 1
+                    ? ("x" + replyPendingFiles.Count.ToString(CultureInfo.InvariantCulture))
+                    : "";
+            }
 
             // Os três botões de áudio e o Enviar precisam ficar acima das
             // faixas no z-order.
@@ -6521,7 +7107,7 @@ namespace TailMsg
             replyPauseButton.BringToFront();
             replyLiveMicButton.BringToFront();
             replyButton.BringToFront();
-            transparencyButton.BringToFront();
+            replyZipButton.BringToFront();
 
             // O clipe acompanha a linha dos microfones em qualquer layout: a
             // faixa de anexo e o player de áudio empurram os botões para baixo,
@@ -6552,40 +7138,37 @@ namespace TailMsg
             if (!IsDisposed)
             {
                 Opacity = NotificationSettings.WindowOpacity;
-                if (transparencyButton != null)
-                {
-                    transparencyButton.Text = NotificationSettings.TransparencyPercent + "%";
-                }
             }
         }
 
-        private void TransparencyButtonClick(object sender, EventArgs e)
+        private void ReplyZipButtonClick(object sender, EventArgs e)
         {
-            UpdateTransparencyMenu();
-            Size menuSize = transparencyMenu.GetPreferredSize(
-                new Size(transparencyButton.Width, 0));
-            transparencyMenu.Show(
-                transparencyButton,
+            if (replyZipMenu == null || replyZipButton == null) return;
+            UpdateReplyZipMenu();
+            Size menuSize = replyZipMenu.GetPreferredSize(
+                new Size(replyZipButton.Width, 0));
+            replyZipMenu.Show(
+                replyZipButton,
                 new Point(
                     0,
                     -menuSize.Height));
         }
 
-        private void UpdateTransparencyMenu()
+        private void UpdateReplyZipMenu()
         {
-            int selected = NotificationSettings.TransparencyPercent;
-            transparencyButton.Text = selected + "%";
-            foreach (ToolStripItem item in transparencyMenu.Items)
+            if (replyZipButton == null || replyZipMenu == null) return;
+            replyZipButton.Text = "Zip " + replyZipLevel;
+            if (replyZipRegularFont == null || replyZipSelectedFont == null) return;
+            foreach (ToolStripItem item in replyZipMenu.Items)
             {
                 ToolStripMenuItem option = item as ToolStripMenuItem;
                 if (option == null) continue;
-                int percent;
-                bool selectedOption = Int32.TryParse(
-                    option.Text.TrimEnd('%'),
-                    out percent) && percent == selected;
+                int level;
+                bool selectedOption = Int32.TryParse(option.Text, out level) &&
+                    level == replyZipLevel;
                 option.Font = selectedOption ?
-                    transparencySelectedFont :
-                    transparencyRegularFont;
+                    replyZipSelectedFont :
+                    replyZipRegularFont;
             }
         }
 
@@ -6593,9 +7176,9 @@ namespace TailMsg
         {
             if (disposing)
             {
-                if (transparencyMenu != null) transparencyMenu.Dispose();
-                if (transparencyRegularFont != null) transparencyRegularFont.Dispose();
-                if (transparencySelectedFont != null) transparencySelectedFont.Dispose();
+                if (replyZipMenu != null) replyZipMenu.Dispose();
+                if (replyZipRegularFont != null) replyZipRegularFont.Dispose();
+                if (replyZipSelectedFont != null) replyZipSelectedFont.Dispose();
                 if (imageThumbnail != null) imageThumbnail.Dispose();
                 if (replyAttachmentThumbnail != null) replyAttachmentThumbnail.Dispose();
                 if (audioPanel != null) audioPanel.Dispose();
@@ -6661,11 +7244,11 @@ namespace TailMsg
             string reply = replyBoxIsTranscription ? "" : replyBox.Text.Trim();
             ImagePayload attachment = pendingReplyImage;
             AudioPayload replyAudioPayload = replyAudio;
-            byte[] replyFileBytes = replyPendingFileBytes;
-            string replyFileName = replyPendingFileName;
+            List<PendingFile> replyFiles = new List<PendingFile>(replyPendingFiles);
+            int replyZip = replyZipLevel;
 
             if (reply.Length == 0 && attachment == null && replyAudioPayload == null &&
-                replyFileBytes == null)
+                replyFiles.Count == 0)
             {
                 replyBox.Focus();
                 return;
@@ -6752,14 +7335,39 @@ namespace TailMsg
                     MainForm.NotifyHistoryChanged();
                 }
 
-                if (failure.Length == 0 && replyFileBytes != null)
+                if (failure.Length == 0 && replyFiles.Count > 0)
                 {
-                    MessageSendResult fileResult = MessageSender.SendFile(
-                        peer,
-                        localComputerName,
-                        replyFileName,
-                        replyFileBytes,
-                        null);
+                    // 1 arquivo vai direto; 2+ vão num zip transparente.
+                    byte[] payloadBytes = null;
+                    string payloadName = "";
+                    string payloadError = "";
+                    if (replyFiles.Count == 1)
+                    {
+                        payloadName = replyFiles[0].Name;
+                        payloadBytes = replyFiles[0].Bytes;
+                    }
+                    else
+                    {
+                        payloadName = FileZipBundle.BundleFileName(replyFiles.Count);
+                        try
+                        {
+                            payloadBytes = FileZipBundle.Create(replyFiles, replyZip);
+                        }
+                        catch (Exception zipError)
+                        {
+                            payloadError = "Não foi possível compactar os arquivos: " +
+                                zipError.Message;
+                        }
+                    }
+                    MessageSendResult fileResult = payloadBytes == null
+                        ? MessageSendResult.Failed(
+                            payloadError, TailMsgDiagnostics.CreateOperationId(), "")
+                        : MessageSender.SendFile(
+                            peer,
+                            localComputerName,
+                            payloadName,
+                            payloadBytes,
+                            null);
                     sentFile = fileResult.Success;
                     if (!fileResult.Success && failure.Length == 0)
                     {
@@ -6769,20 +7377,22 @@ namespace TailMsg
                     {
                         // O arquivo enviado por esta janelinha persiste no
                         // histórico (o painel o reexibe ao recarregar).
+                        bool bundle = replyFiles.Count > 1;
                         string arquivoSalvo = HistoryStore.SaveMedia(
-                            replyFileBytes,
-                            Path.GetExtension(replyFileName));
+                            payloadBytes,
+                            bundle ? ".zip" : Path.GetExtension(payloadName));
                         HistoryStore.Append(new HistoryEntry
                         {
                             Kind = "sent-file",
                             Time = DateTime.Now.ToString("HH:mm"),
                             Sender = peer.Name,
                             Address = peer.Address,
-                            Size = replyFileBytes.Length,
+                            Size = payloadBytes.Length,
                             FileName = arquivoSalvo,
-                            // Nome original do arquivo (o menu e o "salvar
-                            // como" usam depois de recarregar).
-                            Text = replyFileName ?? "",
+                            // Nome original (único) ou nomes do pacote
+                            // separados por "\n" (o menu e o "salvar como"
+                            // usam depois de recarregar).
+                            Text = bundle ? FileZipBundle.JoinNames(replyFiles) : (payloadName ?? ""),
                             OperationId = ""
                         });
                         MainForm.NotifyHistoryChanged();
@@ -7743,6 +8353,269 @@ namespace TailMsg
         public long ByteCount
         {
             get { return PngBytes == null ? 0 : PngBytes.Length; }
+        }
+    }
+
+    // Um arquivo escolhido no clipe (nome original + conteúdo).
+    internal sealed class PendingFile
+    {
+        public string Name;
+        public byte[] Bytes;
+    }
+
+    // Pacote transparente de vários arquivos: com 2+ arquivos o envio
+    // compacta tudo em um zip (nível 0-9, 1 = padrão) sem mostrar ao usuário;
+    // quem recebe vê um clipe com "xN" e o "Salvar como" descompacta tudo na
+    // pasta escolhida. O transporte continua o de arquivo v1 (formato
+    // "file"), e o pacote é um zip válido — clientes antigos o recebem como
+    // um ".zip" normal. O protocolo de rede v1 não muda.
+    internal static class FileZipBundle
+    {
+        public const int DefaultLevel = 1;
+
+        public sealed class ZipEntry
+        {
+            public string Name;
+            public byte[] Bytes;
+        }
+
+        // Nome do pacote no transporte ("3 arquivos.zip").
+        public static string BundleFileName(int count)
+        {
+            return count.ToString(CultureInfo.InvariantCulture) + " arquivos.zip";
+        }
+
+        // Nome de pacote ("N arquivos.zip") com N >= 2?
+        public static bool TryParseBundleName(string fileName, out int count)
+        {
+            count = 0;
+            if (String.IsNullOrEmpty(fileName)) return false;
+            string name = fileName.Trim();
+            if (!name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) return false;
+            string number = name.Substring(0, name.Length - 4).Trim();
+            if (!number.EndsWith("arquivos", StringComparison.OrdinalIgnoreCase)) return false;
+            number = number.Substring(0, number.Length - "arquivos".Length).Trim();
+            if (!Int32.TryParse(
+                number, NumberStyles.None, CultureInfo.InvariantCulture, out count))
+            {
+                return false;
+            }
+            return count >= 2;
+        }
+
+        // Pacote recebido? Exige o nome de pacote E um zip legível com 2+
+        // entradas (um ".zip" comum enviado como arquivo único continua único).
+        public static int DetectBundle(string fileName, byte[] zipBytes)
+        {
+            int named;
+            if (!TryParseBundleName(fileName, out named)) return 0;
+            List<ZipEntry> entries;
+            if (!TryRead(zipBytes, out entries) || entries.Count < 2) return 0;
+            return entries.Count;
+        }
+
+        // Nomes originais separados por "\n" (para o Text do histórico; nomes
+        // reais nunca contêm "\n", proibido no Win32).
+        public static string JoinNames(List<PendingFile> files)
+        {
+            StringBuilder text = new StringBuilder();
+            if (files != null)
+            {
+                foreach (PendingFile file in files)
+                {
+                    if (text.Length > 0) text.Append('\n');
+                    text.Append(file == null ? "" : (file.Name ?? ""));
+                }
+            }
+            return text.ToString();
+        }
+
+        public static string JoinEntryNames(List<ZipEntry> entries)
+        {
+            StringBuilder text = new StringBuilder();
+            if (entries != null)
+            {
+                foreach (ZipEntry entry in entries)
+                {
+                    if (text.Length > 0) text.Append('\n');
+                    text.Append(entry == null ? "" : (entry.Name ?? ""));
+                }
+            }
+            return text.ToString();
+        }
+
+        // Monta o zip. Nível 0 = sem compactação, 1 = padrão; o ZipArchive do
+        // .NET Framework só expõe 3 níveis, então 2-9 usam Optimal.
+        public static byte[] Create(List<PendingFile> files, int level)
+        {
+            if (files == null || files.Count == 0)
+            {
+                throw new ArgumentException("Nenhum arquivo para compactar.");
+            }
+            if (level < 0) level = 0;
+            if (level > 9) level = 9;
+            CompressionLevel compression = level == 0
+                ? CompressionLevel.NoCompression
+                : (level == 1 ? CompressionLevel.Fastest : CompressionLevel.Optimal);
+            using (MemoryStream buffer = new MemoryStream())
+            {
+                using (ZipArchive archive = new ZipArchive(buffer, ZipArchiveMode.Create, true))
+                {
+                    List<string> used = new List<string>();
+                    foreach (PendingFile file in files)
+                    {
+                        string name = Disambiguate(
+                            SanitizeEntryName(file == null ? "" : file.Name), used);
+                        used.Add(name);
+                        ZipArchiveEntry entry = archive.CreateEntry(name, compression);
+                        byte[] bytes = file == null || file.Bytes == null
+                            ? new byte[0] : file.Bytes;
+                        using (Stream target = entry.Open())
+                        {
+                            target.Write(bytes, 0, bytes.Length);
+                        }
+                    }
+                }
+                return buffer.ToArray();
+            }
+        }
+
+        public static bool TryRead(byte[] zipBytes, out List<ZipEntry> entries)
+        {
+            entries = null;
+            if (!IsZipSignature(zipBytes)) return false;
+            try
+            {
+                List<ZipEntry> found = new List<ZipEntry>();
+                using (MemoryStream buffer = new MemoryStream(zipBytes, false))
+                using (ZipArchive archive = new ZipArchive(buffer, ZipArchiveMode.Read))
+                {
+                    foreach (ZipArchiveEntry entry in archive.Entries)
+                    {
+                        string name = SanitizeEntryName(entry.FullName);
+                        if (name.Length == 0) continue;   // diretório
+                        using (Stream source = entry.Open())
+                        using (MemoryStream copy = new MemoryStream())
+                        {
+                            source.CopyTo(copy);
+                            ZipEntry item = new ZipEntry();
+                            item.Name = name;
+                            item.Bytes = copy.ToArray();
+                            found.Add(item);
+                        }
+                    }
+                }
+                if (found.Count == 0) return false;
+                entries = found;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool IsZipSignature(byte[] bytes)
+        {
+            return bytes != null && bytes.Length >= 4 &&
+                bytes[0] == 0x50 && bytes[1] == 0x4B &&
+                (bytes[2] == 0x03 || bytes[2] == 0x05 || bytes[2] == 0x07) &&
+                (bytes[3] == 0x04 || bytes[3] == 0x06 || bytes[3] == 0x08);
+        }
+
+        // Nome seguro dentro do zip/pasta: sem diretórios (anti zip-slip) e
+        // sem caracteres inválidos; nunca vazio.
+        public static string SanitizeEntryName(string name)
+        {
+            if (String.IsNullOrEmpty(name)) return "arquivo";
+            string bare = Path.GetFileName(name.Replace('/', '\\'));
+            if (String.IsNullOrEmpty(bare)) return "arquivo";
+            char[] invalid = Path.GetInvalidFileNameChars();
+            StringBuilder text = new StringBuilder(bare.Length);
+            foreach (char c in bare)
+            {
+                bool bad = c < 32;
+                if (!bad)
+                {
+                    foreach (char forbidden in invalid)
+                    {
+                        if (c == forbidden)
+                        {
+                            bad = true;
+                            break;
+                        }
+                    }
+                }
+                text.Append(bad ? '_' : c);
+            }
+            string clean = text.ToString().Trim();
+            if (clean.Length == 0) return "arquivo";
+            if (clean == "." || clean == "..") return "arquivo";
+            return clean;
+        }
+
+        // Nomes repetidos ganham " (2)", " (3)" antes da extensão.
+        public static string Disambiguate(string name, List<string> used)
+        {
+            if (used == null || !ContainsIgnoreCase(used, name)) return name;
+            string stem = Path.GetFileNameWithoutExtension(name);
+            string extension = Path.GetExtension(name);
+            for (int index = 2; ; index++)
+            {
+                string candidate = stem + " (" + index + ")" + extension;
+                if (!ContainsIgnoreCase(used, candidate)) return candidate;
+            }
+        }
+
+        private static bool ContainsIgnoreCase(List<string> used, string name)
+        {
+            foreach (string seen in used)
+            {
+                if (String.Equals(seen, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Descompacta tudo na pasta (cria se preciso), sem subpastas.
+        public static bool TryExtractToFolder(
+            List<ZipEntry> entries, string folder, out int saved, out string error)
+        {
+            saved = 0;
+            error = "";
+            if (entries == null || entries.Count == 0)
+            {
+                error = "pacote vazio";
+                return false;
+            }
+            if (String.IsNullOrEmpty(folder))
+            {
+                error = "pasta inválida";
+                return false;
+            }
+            try
+            {
+                Directory.CreateDirectory(folder);
+                List<string> used = new List<string>();
+                foreach (ZipEntry entry in entries)
+                {
+                    string name = Disambiguate(
+                        SanitizeEntryName(entry == null ? "" : entry.Name), used);
+                    used.Add(name);
+                    byte[] bytes = entry == null || entry.Bytes == null
+                        ? new byte[0] : entry.Bytes;
+                    File.WriteAllBytes(Path.Combine(folder, name), bytes);
+                    saved++;
+                }
+                return true;
+            }
+            catch (Exception exception)
+            {
+                error = exception.Message;
+                return false;
+            }
         }
     }
 

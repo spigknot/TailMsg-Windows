@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -529,6 +530,209 @@ namespace TailMsg
                 samples[(index * 2) + 1] = (byte)((value >> 8) & 0xFF);
             }
             return TailMsgProtocol.BuildWavContainer(samples, sampleRate, 1, 16);
+        }
+    }
+
+    // Testes sem rede do pacote transparente de vários arquivos (zip): nome
+    // do pacote, ida e volta com nomes/bytes, níveis 0-9, desambiguação de
+    // repetidos, sanitização anti zip-slip, extração e recusas.
+    internal static class FileBundleSelfTests
+    {
+        public static string BundleFailure()
+        {
+            if (FileZipBundle.BundleFileName(3) != "3 arquivos.zip")
+            {
+                return "o nome do pacote divergiu";
+            }
+            int count;
+            if (!FileZipBundle.TryParseBundleName("3 arquivos.zip", out count) || count != 3)
+            {
+                return "o nome de pacote válido foi recusado";
+            }
+            if (!FileZipBundle.TryParseBundleName("12 ARQUIVOS.ZIP", out count) || count != 12)
+            {
+                return "o nome de pacote em maiúsculas foi recusado";
+            }
+            string[] rejectedNames = new string[]
+            {
+                "", "doc.zip", "1 arquivos.zip", "0 arquivos.zip",
+                "x arquivos.zip", "3 arquivos.rar", "3 docs.zip"
+            };
+            foreach (string candidate in rejectedNames)
+            {
+                if (FileZipBundle.TryParseBundleName(candidate, out count))
+                {
+                    return "nome aceito como pacote: " + candidate;
+                }
+            }
+
+            List<PendingFile> files = new List<PendingFile>();
+            files.Add(MakeFile("a.txt", 0, 1000));
+            files.Add(MakeFile("relatório final.pdf", 1, 5000));
+            files.Add(MakeFile("foto.png", 2, 300));
+            foreach (int level in new int[] { 0, 1, 9 })
+            {
+                byte[] zip;
+                try
+                {
+                    zip = FileZipBundle.Create(files, level);
+                }
+                catch (Exception exception)
+                {
+                    return "o pacote nível " + level + " falhou: " + exception.Message;
+                }
+                if (!FileZipBundle.IsZipSignature(zip))
+                {
+                    return "o pacote nível " + level + " não tem assinatura zip";
+                }
+                List<FileZipBundle.ZipEntry> entries;
+                if (!FileZipBundle.TryRead(zip, out entries))
+                {
+                    return "o pacote nível " + level + " não foi lido";
+                }
+                if (entries.Count != 3)
+                {
+                    return "o pacote nível " + level + " perdeu entradas";
+                }
+                for (int index = 0; index < 3; index++)
+                {
+                    if (entries[index].Name != files[index].Name)
+                    {
+                        return "o nome da entrada divergiu no nível " + level;
+                    }
+                    if (!BytesEqual(entries[index].Bytes, files[index].Bytes))
+                    {
+                        return "o conteúdo divergiu no nível " + level;
+                    }
+                }
+                if (FileZipBundle.DetectBundle(FileZipBundle.BundleFileName(3), zip) != 3)
+                {
+                    return "o pacote válido não foi detectado no nível " + level;
+                }
+                string joined = FileZipBundle.JoinEntryNames(entries);
+                if (joined.Split(new char[] { '\n' }).Length != 3)
+                {
+                    return "os nomes do pacote não sobreviveram à junção";
+                }
+            }
+            // Nível fora da faixa é grampeado, não falha.
+            List<FileZipBundle.ZipEntry> clampedEntries;
+            if (!FileZipBundle.TryRead(FileZipBundle.Create(files, 99), out clampedEntries) ||
+                clampedEntries.Count != 3)
+            {
+                return "o nível grampeado não sobreviveu ao roundtrip";
+            }
+
+            // Nomes repetidos ganham " (2)".
+            List<PendingFile> dupes = new List<PendingFile>();
+            dupes.Add(MakeFile("dup.txt", 3, 10));
+            dupes.Add(MakeFile("dup.txt", 4, 10));
+            List<FileZipBundle.ZipEntry> dupeEntries;
+            if (!FileZipBundle.TryRead(FileZipBundle.Create(dupes, 1), out dupeEntries) ||
+                dupeEntries.Count != 2)
+            {
+                return "os repetidos não sobreviveram ao roundtrip";
+            }
+            if (dupeEntries[0].Name != "dup.txt" || dupeEntries[1].Name != "dup (2).txt")
+            {
+                return "a desambiguação divergiu: " +
+                    dupeEntries[0].Name + " / " + dupeEntries[1].Name;
+            }
+
+            // Sanitização anti zip-slip.
+            if (FileZipBundle.SanitizeEntryName("../evil.exe") != "evil.exe")
+            {
+                return "o zip-slip não foi contido";
+            }
+            if (FileZipBundle.SanitizeEntryName("sub/dir/nome.txt") != "nome.txt")
+            {
+                return "o diretório não foi removido da entrada";
+            }
+            if (FileZipBundle.SanitizeEntryName("") != "arquivo")
+            {
+                return "o nome vazio divergiu";
+            }
+
+            // Recusas: zip comum como arquivo único continua único; bytes
+            // ruins não viram pacote.
+            List<PendingFile> single = new List<PendingFile>();
+            single.Add(MakeFile("so.zip", 5, 100));
+            byte[] singleZip = FileZipBundle.Create(single, 0);
+            if (FileZipBundle.DetectBundle("so.zip", singleZip) != 0)
+            {
+                return "o zip comum foi tratado como pacote";
+            }
+            if (FileZipBundle.DetectBundle("2 arquivos.zip", new byte[] { 1, 2, 3, 4 }) != 0)
+            {
+                return "bytes inválidos foram tratados como pacote";
+            }
+            List<FileZipBundle.ZipEntry> refused;
+            if (FileZipBundle.TryRead(new byte[] { 1, 2, 3, 4 }, out refused))
+            {
+                return "bytes inválidos foram lidos como zip";
+            }
+
+            // Extração: os 3 arquivos saem na pasta com o conteúdo intacto.
+            string folder = Path.Combine(
+                Path.GetTempPath(), "TailMsgBundleTest-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                List<FileZipBundle.ZipEntry> toExtract;
+                if (!FileZipBundle.TryRead(FileZipBundle.Create(files, 1), out toExtract))
+                {
+                    return "o pacote da extração não foi lido";
+                }
+                int saved;
+                string error;
+                if (!FileZipBundle.TryExtractToFolder(toExtract, folder, out saved, out error) ||
+                    saved != 3)
+                {
+                    return "a extração falhou: " + error;
+                }
+                foreach (PendingFile file in files)
+                {
+                    string target = Path.Combine(folder, file.Name);
+                    if (!File.Exists(target) || !BytesEqual(File.ReadAllBytes(target), file.Bytes))
+                    {
+                        return "o extraído divergiu: " + file.Name;
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(folder)) Directory.Delete(folder, true);
+                }
+                catch
+                {
+                }
+            }
+            return "";
+        }
+
+        private static PendingFile MakeFile(string name, int seed, int length)
+        {
+            byte[] bytes = new byte[length];
+            for (int index = 0; index < length; index++)
+            {
+                bytes[index] = (byte)((seed * 31 + index) % 251);
+            }
+            PendingFile file = new PendingFile();
+            file.Name = name;
+            file.Bytes = bytes;
+            return file;
+        }
+
+        private static bool BytesEqual(byte[] left, byte[] right)
+        {
+            if (left == null || right == null) return left == right;
+            if (left.Length != right.Length) return false;
+            for (int index = 0; index < left.Length; index++)
+            {
+                if (left[index] != right[index]) return false;
+            }
+            return true;
         }
     }
 

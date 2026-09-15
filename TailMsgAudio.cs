@@ -3072,6 +3072,9 @@ namespace TailMsg
         private readonly Label whoLabel;
         private readonly Label bodyLabel;
         private readonly IconButton openButton;
+        // Selo "xN" do pacote: Label pequena à direita do ícone (fora dele),
+        // em vez de desenhar sobre o clipe.
+        private readonly Label badgeLabel;
         private Image menuThumbnail;
 
         private bool layingOutRow;
@@ -3132,9 +3135,6 @@ namespace TailMsg
             openButton.CircleColor = Color.White;
             openButton.CircleOutline = Color.FromArgb(196, 202, 210);
             openButton.Size = new Size(iconSize, iconSize);
-            openButton.BadgeText = fileCount > 1
-                ? ("x" + fileCount.ToString(CultureInfo.InvariantCulture))
-                : "";
             openButton.Location = new Point(0, 0);
             openButton.Enabled = HasImage();
             openButton.AccessibleName = asFile ? "Abrir arquivo" : "Abrir imagem";
@@ -3142,6 +3142,18 @@ namespace TailMsg
             // menu do botão direito ("Salvar como").
             openButton.Click += delegate { OpenImage(); };
             ContentCell.Controls.Add(openButton);
+
+            // Selo "xN" fora do ícone (à direita, embaixo), menor que o botão:
+            // igual ao selo da prévia antes de enviar.
+            badgeLabel = new Label();
+            badgeLabel.AutoSize = true;
+            badgeLabel.Font = new Font(font.FontFamily, 7F, FontStyle.Bold);
+            badgeLabel.Padding = new Padding(3, 1, 3, 1);
+            badgeLabel.BackColor = Color.FromArgb(31, 41, 55);
+            badgeLabel.ForeColor = Color.White;
+            badgeLabel.Text = "x" + fileCount.ToString(CultureInfo.InvariantCulture);
+            badgeLabel.Visible = fileCount > 1;
+            ContentCell.Controls.Add(badgeLabel);
 
             MontarConteudo();
         }
@@ -3166,6 +3178,8 @@ namespace TailMsg
             celula.Controls.Add(whoLabel);
             celula.Controls.Add(bodyLabel);
             celula.Controls.Add(openButton);
+            celula.Controls.Add(badgeLabel);
+            badgeLabel.Visible = fileCount > 1;
             lastSig = "";
             LayoutRow();
         }
@@ -3183,18 +3197,29 @@ namespace TailMsg
             layingOutRow = true;
             try
             {
-                // Nome em cima; embaixo o ícone e o tamanho, tudo centralizado:
+                // Nome em cima; embaixo o ícone, o selo "xN" (pacote) e o
+                // tamanho, tudo centralizado:
                 //     MIRELLA
-                //     [ícone] (50 kb)
+                //     [ícone][x3] (3 arquivos, 50 kb)
+                int seloW = 0;
+                int seloH = 0;
+                if (fileCount > 1)
+                {
+                    Size seloPref = badgeLabel.GetPreferredSize(Size.Empty);
+                    seloW = seloPref.Width;
+                    seloH = seloPref.Height;
+                }
                 Size tamanhoNome = MedirTexto(whoLabel, available);
                 Size tamanhoCorpo = MedirTexto(bodyLabel,
-                    Math.Max(60, available - openButton.Width - 12));
+                    Math.Max(60, available - openButton.Width - seloW - 16));
                 whoLabel.Size = tamanhoNome;
                 bodyLabel.Size = tamanhoCorpo;
 
                 int gap = 4;
                 int folga = 2;
-                int larguraLinha2 = openButton.Width + gap + tamanhoCorpo.Width;
+                int espacoSelo = fileCount > 1 ? 2 : 0;
+                int larguraLinha2 = openButton.Width + espacoSelo + seloW +
+                    gap + tamanhoCorpo.Width;
                 int alturaLinha2 = Math.Max(openButton.Height, tamanhoCorpo.Height);
                 int alturaBloco = tamanhoNome.Height + folga + alturaLinha2;
                 int topo = 4;
@@ -3205,8 +3230,21 @@ namespace TailMsg
                 int topo2 = topo + tamanhoNome.Height + folga;
                 openButton.Location = new Point(left2,
                     topo2 + Math.Max(0, (alturaLinha2 - openButton.Height) / 2));
-                bodyLabel.Location = new Point(left2 + openButton.Width + gap,
-                    topo2 + Math.Max(0, (alturaLinha2 - tamanhoCorpo.Height) / 2));
+                if (fileCount > 1)
+                {
+                    // Selo fora do ícone: à direita dele, encostado embaixo.
+                    badgeLabel.Location = new Point(
+                        left2 + openButton.Width + espacoSelo,
+                        topo2 + alturaLinha2 - seloH);
+                    bodyLabel.Location = new Point(
+                        left2 + openButton.Width + espacoSelo + seloW + gap,
+                        topo2 + Math.Max(0, (alturaLinha2 - tamanhoCorpo.Height) / 2));
+                }
+                else
+                {
+                    bodyLabel.Location = new Point(left2 + openButton.Width + gap,
+                        topo2 + Math.Max(0, (alturaLinha2 - tamanhoCorpo.Height) / 2));
+                }
 
                 int altura = Math.Max(openButton.Height + 6, alturaBloco + 8);
                 if (Height != altura) Height = altura;
